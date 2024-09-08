@@ -44,13 +44,12 @@ def listenForLeader():
                 # Parse the message and look for a leader announcement
                 messageType, data = parseXmlMessage(rawMessage)
                 if messageType == "leader_announcement":
-                    return data['leader_ip'], int(data['leader_port'])
+                    leaderIp = data['leader_ip']  # Extract the IP directly from XML
+                    leaderPort = int(data['leader_port'])  # Extract the port as an integer
+                    return leaderIp, leaderPort  # Return leader IP and port for connection
             except Exception as e:
                 print(f"Error listening for leader: {e}")
                 continue
-
-
-
 
 def sendMessageToServer(tcpSocket, messageType, **kwargs):
     try:
