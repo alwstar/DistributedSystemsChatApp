@@ -67,11 +67,13 @@ def initiateLeaderElection():
 def announceLeader(leaderAddr):
     print(f"Leader is {leaderAddr}")
     
-    # Broadcast the leader announcement in XML format, using only the IP (no tuple)
-    leaderIp = leaderAddr[0]  # Extract just the IP, not the full tuple
+    leaderIp = leaderAddr[0]
     leaderPort = leaderAddr[1]
-    
+
+    # Create the XML leader announcement
     leaderAnnouncement = createXmlMessage("leader_announcement", leader_ip=leaderIp, leader_port=leaderPort)
+    
+    print(f"Broadcasting leader announcement: {leaderAnnouncement.decode()}")  # Debug print
     
     # Broadcast the leader announcement
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udpSocket:
