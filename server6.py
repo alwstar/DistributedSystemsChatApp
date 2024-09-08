@@ -8,7 +8,6 @@ import xml.etree.ElementTree as ET
 # Constants
 UDP_PORT = 42000
 BUFFER_SIZE = 1024
-TCP_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 6000
 HEARTBEAT_INTERVAL = 5  # Send heartbeat every 5 seconds
 HEARTBEAT_TIMEOUT = 10  # Timeout if no heartbeat received within 10 seconds
 
@@ -76,21 +75,24 @@ def initiateLeaderElection():
 def announceLeader(leaderAddr):
     print(f"Leader is {leaderAddr}")
     
-    # Extract only the IP part from the tuple
-    leaderIp = leaderAddr[0]  # This should be '192.168.56.1' or another valid IP address
-    leaderPort = leaderAddr[1]  # Port number
+    # Correct leader IP and port extraction
+    leaderIp = leaderAddr[0] if isinstance(leaderAddr[0], str) else leaderAddr[0][0]
+    leaderPort = leaderAddr[1]
 
-    # Create XML leader announcement message with only the IP address as a string
+    # Create XML leader announcement message with correct IP address
     leaderAnnouncement = createXmlMessage("leader_announcement", leader_ip=leaderIp, leader_port=leaderPort)
     
     # Debug print to verify the message format
-    print(f"Broadcasting leader announcement: {leaderAnnouncement.decode()}")
+    # print(f"Broadcasting leader announcement: {leaderAnnouncement.decode()}")
 
     # Broadcast the leader announcement
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udpSocket:
         udpSocket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         udpSocket.sendto(leaderAnnouncement, ('<broadcast>', UDP_PORT))
 
+
+
+# Handle client discovery requests and respond if this server is the leader
 def listenForClientDiscovery():
     global leader
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udpSocket:
@@ -110,7 +112,6 @@ def listenForClientDiscovery():
             except Exception as e:
                 print(f"Error listening for client discovery: {e}")
                 break
-
 
 def createXmlMessage(messageType, **kwargs):
     root = ET.Element("message")
@@ -151,7 +152,6 @@ def sendHeartbeat():
                 print(f"Removed failed server {serverPort}")
         time.sleep(HEARTBEAT_INTERVAL)
 
-
 # Monitor heartbeats from servers to detect failures
 def monitorHeartbeat():
     while isActive:
@@ -159,8 +159,10 @@ def monitorHeartbeat():
         for serverPort in list(lastHeartbeat.keys()):
             if currentTime - lastHeartbeat[serverPort] > HEARTBEAT_TIMEOUT:
                 print(f"Server {serverPort} has failed or is unreachable. Triggering election.")
-                del connectedServers[serverPort]
-                del lastHeartbeat[serverPort]
+                if serverPort in connectedServers:
+                    del connectedServers[serverPort]  # Safely delete the server if it exists
+                if serverPort in lastHeartbeat:
+                    del lastHeartbeat[serverPort]  # Safely delete the heartbeat entry if it exists
                 initiateLeaderElection()
         time.sleep(HEARTBEAT_INTERVAL)
 
@@ -193,14 +195,20 @@ def clientConnectionManager(clientSocket, addr):
 
     print(f"Client connected from {addr}")
 
+    clientSocket.settimeout(30)  # Set a 30-second timeout for the client connection
+
     while True:
         try:
             message = clientSocket.recv(BUFFER_SIZE)
             if not message:
+                print(f"Client {addr} disconnected.")
                 break
+            
+            print(f"Received message from client {addr}: {message.decode()}")  # Log received message
 
             # Parse the incoming message
             messageType, data = parseXmlMessage(message)
+            print(f"Parsed message: Type={messageType}, Data={data}")
 
             if messageType == "client_id":
                 clientId = data['client_id']
@@ -212,7 +220,8 @@ def clientConnectionManager(clientSocket, addr):
 
                 # Check if this server is the leader
                 if leader and leader[1] == serverId:
-                    # This server is the leader, so broadcast the message to all connected clients
+                    # Broadcast the message to all connected clients
+                    print(f"Broadcasting message from {clientId} to all clients")
                     for serverPort, serverAddr in connectedServers.items():
                         try:
                             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcpSocket:
@@ -222,20 +231,25 @@ def clientConnectionManager(clientSocket, addr):
                         except Exception as e:
                             print(f"Error broadcasting to server {serverPort}: {e}")
                 else:
-                    # This server is not the leader, so forward the message to the leader
+                    # Forward the message to the leader
                     try:
+                        print(f"Forwarding message to leader at {leader[0][0]}:{leader[1]}")
                         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcpSocket:
                             tcpSocket.connect((leader[0][0], leader[1]))
                             forwardMessage = createXmlMessage("chatroom", client_id=clientId, content=content)
                             tcpSocket.send(forwardMessage)
                     except Exception as e:
                         print(f"Error forwarding message to leader: {e}")
+        except socket.timeout:
+            print(f"Connection timed out for client {addr}.")
+            break
         except Exception as e:
             print(f"Error handling client {addr}: {e}")
             break
 
     clientSocket.close()
     print(f"Client {addr} disconnected.")
+
 
 
 def main():
@@ -257,18 +271,20 @@ def main():
 
     print(f"Starting server on TCP port {serverId}")
 
-    # Start threads for server communication and heartbeats
+    # Start threads for server communication, client discovery, and heartbeats
     broadcastThread = threading.Thread(target=broadcastServerPresence, args=(serverId,))
     listenThread = threading.Thread(target=listenForServers)
     heartbeatThread = threading.Thread(target=sendHeartbeat)
     monitorHeartbeatThread = threading.Thread(target=monitorHeartbeat)
     heartbeatListenerThread = threading.Thread(target=listenForHeartbeats)
+    clientDiscoveryThread = threading.Thread(target=listenForClientDiscovery)
 
     broadcastThread.start()
     listenThread.start()
     heartbeatThread.start()
     monitorHeartbeatThread.start()
     heartbeatListenerThread.start()
+    clientDiscoveryThread.start()
 
     # Accepting client connections (Only the leader handles clients)
     tcpSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -307,6 +323,7 @@ def main():
     heartbeatThread.join()
     monitorHeartbeatThread.join()
     heartbeatListenerThread.join()
+    clientDiscoveryThread.join()
 
 if __name__ == "__main__":
     main()
