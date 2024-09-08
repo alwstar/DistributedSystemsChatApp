@@ -9,7 +9,7 @@ import xml.etree.ElementTree as ET
 UDP_PORT = 42000
 BUFFER_SIZE = 1024
 HEARTBEAT_INTERVAL = 5  # Send heartbeat every 5 seconds
-HEARTBEAT_TIMEOUT = 10  # Timeout if no heartbeat received within 10 seconds
+HEARTBEAT_TIMEOUT = 20  # Timeout if no heartbeat received within 10 seconds
 
 # Global variables
 connectedServers = {}  # Dictionary to store information of discovered servers
@@ -18,6 +18,7 @@ isActive = True  # Server active state
 serverId = None  # Will be set based on the TCP port
 uniqueId = None  # Unique identifier generated for each server
 lastHeartbeat = {}  # Dictionary to store last heartbeat timestamps from other servers
+missedHeartbeats = {}  # Dictionary to store missed heartbeats from other servers
 
 # Shutdown event
 shutdownEvent = threading.Event()
@@ -49,7 +50,7 @@ def listenForServers():
                 if msgStr.startswith("ServerAvailable:"):
                     _, discoveredPort, discoveredUniqueId = msgStr.split(':')
                     discoveredPort = int(discoveredPort)
-                    if discoveredPort != serverId:  # Ignore self
+                    if discoveredPort != serverId and discoveredPort not in connectedServers:
                         connectedServers[discoveredPort] = (serverAddr, discoveredUniqueId)
                         lastHeartbeat[discoveredPort] = time.time()
                         print(f"Discovered server on port {discoveredPort} with ID {discoveredUniqueId}")
@@ -57,6 +58,7 @@ def listenForServers():
             except Exception as e:
                 print(f"Error listening for servers: {e}")
                 break
+
 
 def initiateLeaderElection():
     global leader
@@ -158,12 +160,18 @@ def monitorHeartbeat():
         currentTime = time.time()
         for serverPort in list(lastHeartbeat.keys()):
             if currentTime - lastHeartbeat[serverPort] > HEARTBEAT_TIMEOUT:
-                print(f"Server {serverPort} has failed or is unreachable. Triggering election.")
-                if serverPort in connectedServers:
+                # Increment missed heartbeat count
+                missedHeartbeats[serverPort] = missedHeartbeats.get(serverPort, 0) + 1
+                
+                # If a server misses more than 2 heartbeats, consider it failed
+                if missedHeartbeats[serverPort] > 2:
+                    print(f"Server {serverPort} has failed or is unreachable. Triggering election.")
                     del connectedServers[serverPort]  # Safely delete the server if it exists
-                if serverPort in lastHeartbeat:
-                    del lastHeartbeat[serverPort]  # Safely delete the heartbeat entry if it exists
-                initiateLeaderElection()
+                    del lastHeartbeat[serverPort]
+                    initiateLeaderElection()
+            else:
+                # Reset the missed heartbeat count if a heartbeat is received
+                missedHeartbeats[serverPort] = 0
         time.sleep(HEARTBEAT_INTERVAL)
 
 # Heartbeat response listener
@@ -187,7 +195,7 @@ def listenForHeartbeats():
                 if messageType == "heartbeat":
                     senderId = int(data['mid'])
                     lastHeartbeat[senderId] = time.time()
-                    print(f"Received heartbeat from server {senderId}")
+                    # print(f"Received heartbeat from server {senderId}")
 
 def clientConnectionManager(clientSocket, addr):
     global leader
