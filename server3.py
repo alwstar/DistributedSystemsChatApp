@@ -66,18 +66,19 @@ def initiateLeaderElection():
 
 def announceLeader(leaderAddr):
     print(f"Leader is {leaderAddr}")
-    leaderAnnouncement = createXmlMessage("leader_announcement", leader_ip=leaderAddr[0][0], leader_port=leaderAddr[1])
+    
+    # Prepare leader announcement XML message
+    leaderAnnouncement = createXmlMessage("leader_announcement", leader_ip=leaderAddr[0], leader_port=leaderAddr[1])
+    
+    # Send leader announcement to all connected servers (or broadcast to clients)
     for serverPort, serverAddr in list(connectedServers.items()):
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcpSocket:
-                tcpSocket.connect((serverAddr[0], serverPort))
-                tcpSocket.send(leaderAnnouncement)
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udpSocket:
+                udpSocket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                udpSocket.sendto(leaderAnnouncement, ('<broadcast>', UDP_PORT))  # Broadcast to clients
         except Exception as e:
             print(f"Error sending leader announcement to {serverAddr}: {e}")
-            # Mark the server as failed and remove it
-            del connectedServers[serverPort]
-            del lastHeartbeat[serverPort]
-            print(f"Removed failed server {serverPort}")
+
 
 
 def createXmlMessage(messageType, **kwargs):
