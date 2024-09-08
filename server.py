@@ -16,15 +16,16 @@ class Server:
         self.port = port
         self.identifier = generate_identifier()  # Eindeutiger Identifier
         self.is_leader = False
-        self.leader = None
-        self.peers = {}
+        self.leader = self.identifier  # Am Anfang ist jeder Server sein eigener Leader
+        self.peers = {}  # {Identifier: Zeitstempel}
+        self.leader_election_done = False
 
     # Server-Discovery via UDP-Broadcast
     def broadcast_presence(self):
         udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         while True:
-            message = f"Server {self.identifier} present"
+            message = f"{self.identifier}|{self.leader}"  # Sende Identifier und momentanen Leader
             udp_socket.sendto(message.encode('utf-8'), ('<broadcast>', self.port))
             time.sleep(5)  # Alle 5 Sekunden Broadcast senden
 
@@ -35,22 +36,25 @@ class Server:
         while True:
             message, addr = udp_socket.recvfrom(1024)
             msg = message.decode('utf-8')
-            sender_id = msg.split(" ")[1]
-            if sender_id != self.identifier:  # Sich selbst ignorieren
-                self.peers[sender_id] = time.time()
-                print(f"Discovered peer: {sender_id}")
+            received_identifier, received_leader = msg.split("|")
+            
+            if received_identifier != self.identifier:  # Sich selbst ignorieren
+                self.peers[received_identifier] = time.time()  # Aktualisiere Peers
+                print(f"Discovered peer: {received_identifier}, reported leader: {received_leader}")
+
+                # Leaderwahl nur durchführen, wenn noch nicht abgeschlossen
+                if not self.leader_election_done:
+                    self.check_leader(received_identifier)
 
     # Leader-Election auf Basis des höchsten Identifiers
-    def elect_leader(self):
-        while True:
-            time.sleep(10)  # Alle 10 Sekunden eine neue Wahl
-            if not self.leader or self.leader not in self.peers:
-                self.leader = max(self.peers.keys(), default=self.identifier)
-                self.is_leader = self.leader == self.identifier
-                if self.is_leader:
-                    print(f"I am the leader: {self.identifier}")
-                else:
-                    print(f"Leader is: {self.leader}")
+    def check_leader(self, received_identifier):
+        if received_identifier > self.leader:
+            self.leader = received_identifier
+            print(f"New leader elected: {self.leader}")
+        elif received_identifier == self.leader:
+            print(f"Leader remains: {self.leader}")
+        
+        self.leader_election_done = True
 
     # Heartbeat, um die anderen Server zu prüfen
     def heartbeat(self):
@@ -66,13 +70,12 @@ class Server:
     def start(self):
         threading.Thread(target=self.broadcast_presence).start()
         threading.Thread(target=self.listen_for_peers).start()
-        threading.Thread(target=self.elect_leader).start()
         threading.Thread(target=self.heartbeat).start()
 
-# Liste von Ports
-ports = [12345, 12346, 12347, 12348, 12349]
-
+# Beispiel zur Nutzung des Servers
 if __name__ == "__main__":
+    ports = [12345, 12346, 12347, 12348, 12349]
+    
     for port in ports:
         print(f"Starting server on port: {port}")
         server = Server(port=port)
