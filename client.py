@@ -38,13 +38,18 @@ def listenForLeader():
         while True:
             try:
                 message, serverAddr = udpSocket.recvfrom(BUFFER_SIZE)
-                print(f"Raw message received: {message.decode()}")  # Print the raw message for debugging
-                messageType, data = parseXmlMessage(message.decode())  # Attempt to parse the message
+                rawMessage = message.decode()
+                print(f"Raw message received: {rawMessage}")
+                
+                # Parse the message and look for a leader announcement
+                messageType, data = parseXmlMessage(rawMessage)
                 if messageType == "leader_announcement":
                     return data['leader_ip'], int(data['leader_port'])
             except Exception as e:
                 print(f"Error listening for leader: {e}")
                 continue
+
+
 
 
 def sendMessageToServer(tcpSocket, messageType, **kwargs):
