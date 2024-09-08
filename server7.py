@@ -85,12 +85,13 @@ def announceLeader(leaderAddr):
     leaderAnnouncement = createXmlMessage("leader_announcement", leader_ip=leaderIp, leader_port=leaderPort)
     
     # Debug print to verify the message format
-    # print(f"Broadcasting leader announcement: {leaderAnnouncement.decode()}")
+    print(f"Broadcasting leader announcement: {leaderAnnouncement.decode()}")
 
     # Broadcast the leader announcement
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udpSocket:
         udpSocket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         udpSocket.sendto(leaderAnnouncement, ('<broadcast>', UDP_PORT))
+
 
 
 
@@ -114,6 +115,7 @@ def listenForClientDiscovery():
             except Exception as e:
                 print(f"Error listening for client discovery: {e}")
                 break
+
 
 def createXmlMessage(messageType, **kwargs):
     root = ET.Element("message")
@@ -160,19 +162,21 @@ def monitorHeartbeat():
         currentTime = time.time()
         for serverPort in list(lastHeartbeat.keys()):
             if currentTime - lastHeartbeat[serverPort] > HEARTBEAT_TIMEOUT:
-                # Increment missed heartbeat count
-                missedHeartbeats[serverPort] = missedHeartbeats.get(serverPort, 0) + 1
+                print(f"Server {serverPort} has failed or is unreachable.")
                 
-                # If a server misses more than 2 heartbeats, consider it failed
-                if missedHeartbeats[serverPort] > 2:
-                    print(f"Server {serverPort} has failed or is unreachable. Triggering election.")
-                    del connectedServers[serverPort]  # Safely delete the server if it exists
+                # Check if the failed server is the leader
+                if leader and leader[1] == serverPort:
+                    print(f"Leader {serverPort} has failed. Triggering election.")
+                    del connectedServers[serverPort]
                     del lastHeartbeat[serverPort]
-                    initiateLeaderElection()
-            else:
-                # Reset the missed heartbeat count if a heartbeat is received
-                missedHeartbeats[serverPort] = 0
+                    initiateLeaderElection()  # Only trigger election if the leader fails
+                else:
+                    # Just remove the non-leader server, no election needed
+                    print(f"Removing server {serverPort}. No election needed as it's not the leader.")
+                    del connectedServers[serverPort]
+                    del lastHeartbeat[serverPort]
         time.sleep(HEARTBEAT_INTERVAL)
+
 
 # Heartbeat response listener
 def parseXmlMessage(xmlString):
