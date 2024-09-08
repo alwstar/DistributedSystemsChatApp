@@ -21,13 +21,14 @@ lastHeartbeat = {}  # Dictionary to store last heartbeat timestamps from other s
 # Shutdown event
 shutdownEvent = threading.Event()
 
-def broadcastServerPresence(tcpPort):
+def broadcastServerPresence():
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udpSocket:
         udpSocket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         while isActive:
-            message = f"ServerAvailable:{tcpPort}".encode()
-            udpSocket.sendto(message, ('<broadcast>', UDP_PORT))
+            leaderAnnouncement = createXmlMessage("leader_announcement", leader_ip="192.168.56.1", leader_port=TCP_PORT)
+            udpSocket.sendto(leaderAnnouncement, ('<broadcast>', UDP_PORT))
             time.sleep(10)
+
 
 def listenForServers():
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udpSocket:
