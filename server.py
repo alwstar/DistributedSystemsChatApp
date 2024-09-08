@@ -26,13 +26,13 @@ class Server:
         udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         while True:
             message = f"{self.identifier}|{self.leader}"  # Sende Identifier und momentanen Leader
-            udp_socket.sendto(message.encode('utf-8'), ('<broadcast>', self.port))
+            udp_socket.sendto(message.encode('utf-8'), ('127.0.0.1', self.port))
             time.sleep(5)  # Alle 5 Sekunden Broadcast senden
 
     # UDP-Empfänger, um andere Server zu entdecken
     def listen_for_peers(self):
         udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        udp_socket.bind(("", self.port))
+        udp_socket.bind(("127.0.0.1", self.port))
         while True:
             message, addr = udp_socket.recvfrom(1024)
             msg = message.decode('utf-8')
