@@ -5,14 +5,18 @@ import sys
 import xml.etree.ElementTree as ET
 
 # Constants
-UDP_PORT = 42000  # Default UDP port for server discovery
+UDP_PORT = 42000
 BUFFER_SIZE = 1024
+TCP_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 6000
+HEARTBEAT_INTERVAL = 5  # Send heartbeat every 5 seconds
+HEARTBEAT_TIMEOUT = 10  # Timeout if no heartbeat received within 10 seconds
 
 # Global variables
 connectedServers = {}  # Dictionary to store information of discovered servers
 leader = None  # Current leader
 isActive = True  # Server active state
 serverId = None  # Will be set based on the TCP port
+lastHeartbeat = {}  # Dictionary to store last heartbeat timestamps from other servers
 
 # Shutdown event
 shutdownEvent = threading.Event()
@@ -39,6 +43,7 @@ def listenForServers():
                     discoveredPort = int(discoveredPort)
                     if discoveredPort != serverId:  # Ignore self
                         connectedServers[discoveredPort] = serverAddr
+                        lastHeartbeat[discoveredPort] = time.time()
                         print(f"Discovered server on port {discoveredPort}")
                         initiateLeaderElection()
             except Exception as e:
@@ -62,13 +67,18 @@ def initiateLeaderElection():
 def announceLeader(leaderAddr):
     print(f"Leader is {leaderAddr}")
     leaderAnnouncement = createXmlMessage("leader_announcement", leader_ip=leaderAddr[0][0], leader_port=leaderAddr[1])
-    for serverAddr in connectedServers.values():
+    for serverPort, serverAddr in list(connectedServers.items()):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcpSocket:
-                tcpSocket.connect((serverAddr[0], leaderAddr[1]))
+                tcpSocket.connect((serverAddr[0], serverPort))
                 tcpSocket.send(leaderAnnouncement)
         except Exception as e:
             print(f"Error sending leader announcement to {serverAddr}: {e}")
+            # Mark the server as failed and remove it
+            del connectedServers[serverPort]
+            del lastHeartbeat[serverPort]
+            print(f"Removed failed server {serverPort}")
+
 
 def createXmlMessage(messageType, **kwargs):
     root = ET.Element("message")
@@ -92,6 +102,61 @@ def terminateServer(tcpSocket):
     tcpSocket.close()
     print("Server has been terminated.")
 
+# Heartbeat mechanism to send heartbeat to all servers
+def sendHeartbeat():
+    while isActive:
+        for serverPort, serverAddr in list(connectedServers.items()):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcpSocket:
+                    tcpSocket.connect((serverAddr[0], serverPort))
+                    heartbeatMessage = createXmlMessage("heartbeat", mid=str(serverId))
+                    tcpSocket.send(heartbeatMessage)
+            except Exception as e:
+                print(f"Error sending heartbeat to server {serverAddr}: {e}")
+                # Mark the server as failed and remove it
+                del connectedServers[serverPort]
+                del lastHeartbeat[serverPort]
+                print(f"Removed failed server {serverPort}")
+        time.sleep(HEARTBEAT_INTERVAL)
+
+
+# Monitor heartbeats from servers to detect failures
+def monitorHeartbeat():
+    while isActive:
+        currentTime = time.time()
+        for serverPort in list(lastHeartbeat.keys()):
+            if currentTime - lastHeartbeat[serverPort] > HEARTBEAT_TIMEOUT:
+                print(f"Server {serverPort} has failed or is unreachable. Triggering election.")
+                del connectedServers[serverPort]
+                del lastHeartbeat[serverPort]
+                initiateLeaderElection()
+        time.sleep(HEARTBEAT_INTERVAL)
+
+
+# Heartbeat response listener
+def parseXmlMessage(xmlString):
+    root = ET.fromstring(xmlString)
+    messageType = root.find("type").text
+    data = {child.tag: child.text for child in root if child.tag != "type"}
+    return messageType, data
+
+# Heartbeat response listener
+def listenForHeartbeats():
+    while isActive:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcpSocket:
+            tcpSocket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            tcpSocket.bind(('', serverId))
+            tcpSocket.listen()
+            while isActive:
+                conn, addr = tcpSocket.accept()
+                message = conn.recv(BUFFER_SIZE)
+                messageType, data = parseXmlMessage(message)
+                if messageType == "heartbeat":
+                    senderId = int(data['mid'])
+                    lastHeartbeat[senderId] = time.time()
+                    print(f"Received heartbeat from server {senderId}")
+
+
 def main():
     global serverId, isActive
 
@@ -107,11 +172,18 @@ def main():
 
     print(f"Starting server on TCP port {serverId}")
 
+    # Start threads for broadcasting, listening, and monitoring heartbeats
     broadcastThread = threading.Thread(target=broadcastServerPresence, args=(serverId,))
-    broadcastThread.start()
-
     listenThread = threading.Thread(target=listenForServers)
+    heartbeatThread = threading.Thread(target=sendHeartbeat)
+    monitorHeartbeatThread = threading.Thread(target=monitorHeartbeat)
+    heartbeatListenerThread = threading.Thread(target=listenForHeartbeats)
+
+    broadcastThread.start()
     listenThread.start()
+    heartbeatThread.start()
+    monitorHeartbeatThread.start()
+    heartbeatListenerThread.start()
 
     tcpSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     tcpSocket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -119,7 +191,6 @@ def main():
     tcpSocket.listen()
     print(f"TCP server listening on port {serverId}")
 
-    # Keep running until the server is terminated
     while isActive:
         cmd = input("\nSelect an option\n1: Display current leader\n2: Show discovered servers\n3: Terminate server\n")
         if cmd == '3':
@@ -135,8 +206,12 @@ def main():
         else:
             print("Invalid command.")
 
-    listenThread.join()
+    # Wait for all threads to finish before exiting
     broadcastThread.join()
+    listenThread.join()
+    heartbeatThread.join()
+    monitorHeartbeatThread.join()
+    heartbeatListenerThread.join()
 
 if __name__ == "__main__":
     main()
