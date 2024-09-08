@@ -83,6 +83,7 @@ def announceLeader(leaderAddr):
         udpSocket.sendto(leaderAnnouncement, ('<broadcast>', UDP_PORT))
 
 
+
 def createXmlMessage(messageType, **kwargs):
     root = ET.Element("message")
     ET.SubElement(root, "type").text = messageType
