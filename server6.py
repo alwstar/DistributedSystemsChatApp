@@ -195,61 +195,61 @@ def clientConnectionManager(clientSocket, addr):
 
     print(f"Client connected from {addr}")
 
-    clientSocket.settimeout(30)  # Set a 30-second timeout for the client connection
+    try:
+        clientSocket.settimeout(30)  # Set a timeout for client communication
 
-    while True:
-        try:
-            message = clientSocket.recv(BUFFER_SIZE)
-            if not message:
-                print(f"Client {addr} disconnected.")
-                break
-            
-            print(f"Received message from client {addr}: {message.decode()}")  # Log received message
+        while True:
+            try:
+                message = clientSocket.recv(BUFFER_SIZE)
+                if not message:
+                    print(f"Client {addr} disconnected.")
+                    break
 
-            # Parse the incoming message
-            messageType, data = parseXmlMessage(message)
-            print(f"Parsed message: Type={messageType}, Data={data}")
+                print(f"Received message from client {addr}: {message.decode()}")
 
-            if messageType == "client_id":
-                clientId = data['client_id']
-                print(f"Client {clientId} connected.")
+                # Parse the incoming message
+                messageType, data = parseXmlMessage(message)
+                print(f"Parsed message: Type={messageType}, Data={data}")
 
-            elif messageType == "chatroom":
-                content = data['content']
-                print(f"Message from {clientId}: {content}")
+                if messageType == "client_id":
+                    clientId = data['client_id']
+                    print(f"Client {clientId} connected.")
 
-                # Check if this server is the leader
-                if leader and leader[1] == serverId:
-                    # Broadcast the message to all connected clients
-                    print(f"Broadcasting message from {clientId} to all clients")
-                    for serverPort, serverAddr in connectedServers.items():
+                elif messageType == "chatroom":
+                    content = data['content']
+                    print(f"Message from {clientId}: {content}")
+
+                    # Check if this server is the leader
+                    if leader and leader[1] == serverId:
+                        print(f"Broadcasting message from {clientId} to all clients.")
+                        # Broadcast the message to all connected servers/clients
+                        for serverPort, serverAddr in connectedServers.items():
+                            try:
+                                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcpSocket:
+                                    tcpSocket.connect((serverAddr[0][0], serverPort))
+                                    chatMessage = createXmlMessage("chatroom", client_id=clientId, content=content)
+                                    tcpSocket.send(chatMessage)
+                            except Exception as e:
+                                print(f"Error broadcasting to server {serverPort}: {e}")
+                    else:
+                        # Forward the message to the leader if this server is not the leader
                         try:
+                            print(f"Forwarding message to leader at {leader[0][0]}:{leader[1]}")
                             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcpSocket:
-                                tcpSocket.connect((serverAddr[0][0], serverPort))
-                                chatMessage = createXmlMessage("chatroom", client_id=clientId, content=content)
-                                tcpSocket.send(chatMessage)
+                                tcpSocket.connect((leader[0][0], leader[1]))
+                                forwardMessage = createXmlMessage("chatroom", client_id=clientId, content=content)
+                                tcpSocket.send(forwardMessage)
                         except Exception as e:
-                            print(f"Error broadcasting to server {serverPort}: {e}")
-                else:
-                    # Forward the message to the leader
-                    try:
-                        print(f"Forwarding message to leader at {leader[0][0]}:{leader[1]}")
-                        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcpSocket:
-                            tcpSocket.connect((leader[0][0], leader[1]))
-                            forwardMessage = createXmlMessage("chatroom", client_id=clientId, content=content)
-                            tcpSocket.send(forwardMessage)
-                    except Exception as e:
-                        print(f"Error forwarding message to leader: {e}")
-        except socket.timeout:
-            print(f"Connection timed out for client {addr}.")
-            break
-        except Exception as e:
-            print(f"Error handling client {addr}: {e}")
-            break
-
-    clientSocket.close()
-    print(f"Client {addr} disconnected.")
-
+                            print(f"Error forwarding message to leader: {e}")
+            except socket.timeout:
+                print(f"Connection timed out for client {addr}.")
+                break
+            except Exception as e:
+                print(f"Error handling client {addr}: {e}")
+                break
+    finally:
+        clientSocket.close()
+        print(f"Client {addr} disconnected.")
 
 
 def main():

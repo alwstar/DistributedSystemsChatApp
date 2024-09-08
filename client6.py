@@ -83,6 +83,7 @@ def sendMessage(clientSocket, clientId, leader_ip, leader_port):
             if message.strip().lower() == "quit":
                 break
             chatMessage = createXmlMessage("chatroom", client_id=clientId, content=message)
+            print(f"Sending message: {chatMessage.decode()}")
             clientSocket.send(chatMessage)
         except Exception as e:
             print(f"Connection lost: {e}")
@@ -93,6 +94,7 @@ def sendMessage(clientSocket, clientId, leader_ip, leader_port):
                 break
 
     clientSocket.close()
+
 
 def main():
     clientId = input("Enter your client ID: ")
