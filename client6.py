@@ -7,6 +7,7 @@ import xml.etree.ElementTree as ET
 BUFFER_SIZE = 1024
 DEFAULT_PORT = 7000  # Default client port for listening to server responses
 UDP_PORT = 42000  # UDP port for broadcasting
+current_leader = None
 
 # Function to create XML messages for communication
 def createXmlMessage(messageType, **kwargs):
@@ -95,6 +96,34 @@ def sendMessage(clientSocket, clientId, leader_ip, leader_port):
 
     clientSocket.close()
 
+# Thread to continuously check for leader updates
+def monitorLeader(clientId):
+    global current_leader
+    while True:
+        new_leader_ip, new_leader_port = discoverLeader()
+        if new_leader_ip is not None and (current_leader is None or current_leader != (new_leader_ip, new_leader_port)):
+            print(f"New leader detected: {new_leader_ip}:{new_leader_port}")
+            current_leader = (new_leader_ip, new_leader_port)
+            reconnectToNewLeader(clientId, new_leader_ip, new_leader_port)
+        time.sleep(10)  # Poll every 10 seconds
+
+# Reconnect to a new leader when detected
+def reconnectToNewLeader(clientId, leader_ip, leader_port):
+    print(f"Reconnecting to new leader at {leader_ip}:{leader_port}")
+    clientSocket = connectToLeader(leader_ip, leader_port)
+    if clientSocket is None:
+        print("Failed to connect to the new leader. Exiting.")
+        return
+
+    # Send initial client ID to the new leader
+    clientIdMessage = createXmlMessage("client_id", client_id=clientId)
+    clientSocket.send(clientIdMessage)
+
+    # Start a thread to receive messages from the new leader
+    threading.Thread(target=receiveMessages, args=(clientSocket,), daemon=True).start()
+
+    # Start sending messages and handle potential disconnections
+    sendMessage(clientSocket, clientId, leader_ip, leader_port)
 
 def main():
     clientId = input("Enter your client ID: ")
@@ -105,7 +134,11 @@ def main():
         print("Failed to discover the leader. Exiting.")
         return
 
-    # Connect to the leader
+    # Set the current leader globally
+    global current_leader
+    current_leader = (leader_ip, leader_port)
+
+    # Connect to the current leader
     clientSocket = connectToLeader(leader_ip, leader_port)
     if clientSocket is None:
         print("Could not connect to the leader. Exiting.")
@@ -114,6 +147,9 @@ def main():
     # Send initial client ID to the leader
     clientIdMessage = createXmlMessage("client_id", client_id=clientId)
     clientSocket.send(clientIdMessage)
+
+    # Start a thread to monitor for leader changes
+    threading.Thread(target=monitorLeader, args=(clientId,), daemon=True).start()
 
     # Start a thread to receive messages from the server
     threading.Thread(target=receiveMessages, args=(clientSocket,), daemon=True).start()
