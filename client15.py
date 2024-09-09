@@ -38,13 +38,13 @@ class Client:
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as handshake_socket:
                     handshake_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-                    handshake_socket.settimeout(2)  # Increased timeout
+                    handshake_socket.settimeout(2)
                     handshake_message = "REQUEST_CONNECTION_CLIENT"
                     handshake_socket.sendto(handshake_message.encode('utf-8'), ('<broadcast>', port))
                     print(f"Sent handshake request to broadcast address on port {port}")
 
                     start_time = time.time()
-                    while time.time() - start_time < 5:  # Wait for up to 5 seconds
+                    while time.time() - start_time < 5:
                         try:
                             response, server_address = handshake_socket.recvfrom(1024)
                             server_info = response.decode('utf-8')
