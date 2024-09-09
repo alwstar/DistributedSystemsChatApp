@@ -5,11 +5,12 @@ import time
 
 print("Script is starting...")
 
-DISCOVERY_PORT = 60000  # Fixed port for discovery
-CLIENT_HANDSHAKE_PORTS = [60000, 60001, 60002, 60003]  # Ports for client handshake
-HEARTBEAT_INTERVAL = 5  # Seconds between heartbeats
-HEARTBEAT_TIMEOUT = 15  # Seconds to wait before considering leader dead
-LEADER_BROADCAST_INTERVAL = 5  # Seconds between leader broadcasts
+DISCOVERY_PORT = 60000
+CLIENT_HANDSHAKE_PORTS = [60000, 60001, 60002, 60003]
+HEARTBEAT_INTERVAL = 2
+HEARTBEAT_TIMEOUT = 10
+LEADER_BROADCAST_INTERVAL = 2
+ELECTION_COOLDOWN = 15
 
 class Server:
     def __init__(self):
@@ -28,6 +29,7 @@ class Server:
         self.leader_ip = None
         self.leader_port = None
         self.last_heartbeat = time.time()
+        self.last_election_time = 0
 
     def generate_identifier(self):
         timestamp = int(time.time() * 1000)  # milliseconds
@@ -118,10 +120,16 @@ class Server:
                 print(f"Error in discovery listener: {e}")
 
     def start_election(self):
+        current_time = time.time()
+        if current_time - self.last_election_time < ELECTION_COOLDOWN:
+            print("Election cooldown in effect. Skipping election.")
+            return
+
         if self.election_in_progress:
             return
 
         self.election_in_progress = True
+        self.last_election_time = current_time
         print("Starting election process...")
         highest_id = max(list(self.other_servers.keys()) + [self.identifier])
 
@@ -169,6 +177,7 @@ class Server:
             for server_id, (ip, port) in self.other_servers.items():
                 try:
                     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                        s.settimeout(2)
                         s.connect((ip, port))
                         s.sendall(f"HEARTBEAT:{self.identifier}".encode('utf-8'))
                 except:
@@ -230,6 +239,10 @@ class Server:
             except socket.error as e:
                 print(f"Error handling connection from {client_address}: {e}")
                 break
+        
+        with self.lock:
+            if client_address in self.clients:
+                del self.clients[client_address]
         client_socket.close()
 
     def handle_election_message(self, message):

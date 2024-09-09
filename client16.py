@@ -3,7 +3,8 @@ import threading
 import time
 
 CLIENT_HANDSHAKE_PORTS = [60000, 60001, 60002, 60003]
-LEADER_HEARTBEAT_TIMEOUT = 20  # Seconds to wait before considering leader dead
+LEADER_HEARTBEAT_TIMEOUT = 12
+RECONNECTION_DELAY = 5
 
 class Client:
     def __init__(self):
@@ -20,7 +21,7 @@ class Client:
     def listen_for_leader(self):
         leader_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         leader_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        leader_socket.bind(('', CLIENT_HANDSHAKE_PORTS[0]))  # Bind to the first handshake port
+        leader_socket.bind(('', CLIENT_HANDSHAKE_PORTS[0]))
 
         while not self.terminate:
             try:
@@ -56,10 +57,12 @@ class Client:
         except socket.error as e:
             print(f"Error connecting to leader: {e}. Will retry on next leader broadcast.")
             self.connected = False
+            time.sleep(RECONNECTION_DELAY)
 
     def reconnect_to_leader(self):
         print("Reconnecting to new leader...")
         self.cleanup()
+        time.sleep(RECONNECTION_DELAY)
         self.connect_to_leader()
 
     def start_heartbeat(self):
