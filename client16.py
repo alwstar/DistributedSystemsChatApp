@@ -2,10 +2,11 @@ import socket
 import threading
 import time
 
+CLIENT_HANDSHAKE_PORTS = [60000, 60001, 60002, 60003]
+LEADER_HEARTBEAT_TIMEOUT = 20  # Seconds to wait before considering leader dead
+
 class Client:
-    def __init__(self, server_ip, handshake_ports=[60000, 60001, 60002, 60003]):
-        self.server_ip = server_ip
-        self.handshake_ports = handshake_ports
+    def __init__(self):
         self.leader_ip = None
         self.leader_port = None
         self.socket = None
@@ -14,51 +15,52 @@ class Client:
         self.heartbeat_thread = None
         self.receive_thread = None
         self.terminate = False
+        self.last_leader_heartbeat = time.time()
+
+    def listen_for_leader(self):
+        leader_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        leader_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        leader_socket.bind(('', CLIENT_HANDSHAKE_PORTS[0]))  # Bind to the first handshake port
+
+        while not self.terminate:
+            try:
+                data, addr = leader_socket.recvfrom(1024)
+                message = data.decode('utf-8')
+                if message.startswith("LEADER:"):
+                    _, leader_id, new_leader_ip, new_leader_port = message.split(':')
+                    new_leader_port = int(new_leader_port)
+                    if (new_leader_ip, new_leader_port) != (self.leader_ip, self.leader_port):
+                        print(f"New leader detected: {new_leader_ip}:{new_leader_port}")
+                        self.leader_ip = new_leader_ip
+                        self.leader_port = new_leader_port
+                        if self.connected:
+                            self.reconnect_to_leader()
+                        else:
+                            self.connect_to_leader()
+            except Exception as e:
+                print(f"Error listening for leader: {e}")
 
     def connect_to_leader(self):
-        retry_count = 0
-        while not self.connected and retry_count < 5:
-            if self.perform_handshake():
-                try:
-                    self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    self.socket.connect((self.leader_ip, self.leader_port))
-                    self.connected = True
-                    self.terminate = False
-                    print(f"Connected to leader at ({self.leader_ip}, {self.leader_port})")
-                    self.start_heartbeat()
-                    self.start_receiving()
-                    return
-                except socket.error as e:
-                    print(f"Error connecting to leader: {e}. Retrying...")
-            retry_count += 1
-            time.sleep(2)
-        print("Failed to connect to leader after multiple attempts.")
+        if not self.leader_ip or not self.leader_port:
+            print("No leader information available. Waiting for leader broadcast...")
+            return
 
-    def perform_handshake(self):
-        for port in self.handshake_ports:
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as handshake_socket:
-                    handshake_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-                    handshake_socket.settimeout(2)
-                    handshake_message = "REQUEST_CONNECTION_CLIENT"
-                    handshake_socket.sendto(handshake_message.encode('utf-8'), ('<broadcast>', port))
-                    print(f"Sent handshake request to broadcast address on port {port}")
+        try:
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.socket.connect((self.leader_ip, self.leader_port))
+            self.connected = True
+            self.terminate = False
+            print(f"Connected to leader at ({self.leader_ip}, {self.leader_port})")
+            self.start_heartbeat()
+            self.start_receiving()
+        except socket.error as e:
+            print(f"Error connecting to leader: {e}. Will retry on next leader broadcast.")
+            self.connected = False
 
-                    start_time = time.time()
-                    while time.time() - start_time < 5:
-                        try:
-                            response, server_address = handshake_socket.recvfrom(1024)
-                            server_info = response.decode('utf-8')
-                            self.leader_ip, self.leader_port = server_info.split(':')
-                            self.leader_port = int(self.leader_port)
-                            print(f"Received handshake response from {server_address}: Leader IP {self.leader_ip}, Port {self.leader_port}")
-                            return True
-                        except socket.timeout:
-                            print(f"No response yet on port {port}, continuing to listen...")
-            except Exception as e:
-                print(f"Error during handshake on port {port}: {e}")
-        print("Failed to receive handshake response from all ports.")
-        return False
+    def reconnect_to_leader(self):
+        print("Reconnecting to new leader...")
+        self.cleanup()
+        self.connect_to_leader()
 
     def start_heartbeat(self):
         if self.connected:
@@ -73,8 +75,6 @@ class Client:
             except socket.error as e:
                 print(f"Error sending heartbeat: {e}")
                 self.connected = False
-                self.cleanup()
-                self.connect_to_leader()
 
     def start_receiving(self):
         if self.connected:
@@ -87,29 +87,27 @@ class Client:
                 data = self.socket.recv(1024)
                 if data:
                     message = data.decode('utf-8')
-                    if message.startswith("REDIRECT:"):
-                        _, new_ip, new_port = message.split(':')
-                        print(f"Redirected to new leader: {new_ip}:{new_port}")
-                        self.leader_ip = new_ip
-                        self.leader_port = int(new_port)
-                        self.connected = False
-                        self.cleanup()
-                        self.connect_to_leader()
+                    if message == "LEADER_HEARTBEAT":
+                        self.last_leader_heartbeat = time.time()
                     elif message != "HEARTBEAT_ACK":
                         print(f"Message from leader: {message}")
                 else:
                     print("No data received, leader may have disconnected")
                     self.connected = False
-                    self.cleanup()
-                    self.connect_to_leader()
             except socket.error as e:
                 print(f"Error receiving data: {e}")
                 self.connected = False
+
+    def monitor_leader_heartbeat(self):
+        while not self.terminate:
+            if self.connected and time.time() - self.last_leader_heartbeat > LEADER_HEARTBEAT_TIMEOUT:
+                print("Leader heartbeat timeout. Disconnecting and waiting for new leader...")
+                self.connected = False
                 self.cleanup()
-                self.connect_to_leader()
+            time.sleep(1)
 
     def cleanup(self):
-        self.terminate = True
+        self.connected = False
         if self.socket:
             self.socket.close()
         if self.heartbeat_thread and threading.current_thread() != self.heartbeat_thread:
@@ -125,27 +123,31 @@ class Client:
             except socket.error as e:
                 print(f"Error sending message: {e}")
                 self.connected = False
-                self.cleanup()
-                self.connect_to_leader()
 
     def run(self):
+        leader_listener_thread = threading.Thread(target=self.listen_for_leader, daemon=True)
+        leader_listener_thread.start()
+
+        heartbeat_monitor_thread = threading.Thread(target=self.monitor_leader_heartbeat, daemon=True)
+        heartbeat_monitor_thread.start()
+
         try:
-            self.connect_to_leader()
-            if not self.connected:
-                print("Failed to connect to leader. Exiting.")
-                return
             while True:
-                user_input = input("Enter message to send to leader (or 'exit' to quit): ")
-                if user_input.lower() == 'exit':
-                    break
-                self.send_message(user_input)
+                if self.connected:
+                    user_input = input("Enter message to send to leader (or 'exit' to quit): ")
+                    if user_input.lower() == 'exit':
+                        break
+                    self.send_message(user_input)
+                else:
+                    print("Not connected to a leader. Waiting for leader broadcast...")
+                    time.sleep(5)
         except KeyboardInterrupt:
             print("\nClient shutting down...")
         finally:
+            self.terminate = True
             self.cleanup()
             print("Client shutdown complete.")
 
 if __name__ == "__main__":
-    server_ip = "255.255.255.255"  # Broadcast IP address for handshake
-    client = Client(server_ip)
+    client = Client()
     client.run()

@@ -9,6 +9,7 @@ DISCOVERY_PORT = 60000  # Fixed port for discovery
 CLIENT_HANDSHAKE_PORTS = [60000, 60001, 60002, 60003]  # Ports for client handshake
 HEARTBEAT_INTERVAL = 5  # Seconds between heartbeats
 HEARTBEAT_TIMEOUT = 15  # Seconds to wait before considering leader dead
+LEADER_BROADCAST_INTERVAL = 3  # Seconds between leader broadcasts
 
 class Server:
     def __init__(self):
@@ -163,8 +164,10 @@ class Server:
             except:
                 print(f"Failed to send coordinator message to {server_id}")
         
-        # Start sending heartbeats
+        # Start sending heartbeats and leader broadcasts
         threading.Thread(target=self.send_heartbeats, daemon=True).start()
+        threading.Thread(target=self.broadcast_leader_info, daemon=True).start()
+        threading.Thread(target=self.send_client_heartbeats, daemon=True).start()
 
     def send_heartbeats(self):
         while self.running and self.is_leader:
@@ -175,6 +178,17 @@ class Server:
                         s.sendall(f"HEARTBEAT:{self.identifier}".encode('utf-8'))
                 except:
                     print(f"Failed to send heartbeat to {server_id}")
+            time.sleep(HEARTBEAT_INTERVAL)
+
+    def send_client_heartbeats(self):
+        while self.running and self.is_leader:
+            with self.lock:
+                for client_socket in self.clients.values():
+                    try:
+                        client_socket.sendall(b"LEADER_HEARTBEAT")
+                    except:
+                        # Handle disconnected clients
+                        pass
             time.sleep(HEARTBEAT_INTERVAL)
 
     def accept_connections(self):
@@ -193,6 +207,9 @@ class Server:
             client_socket.close()
             return
 
+        with self.lock:
+            self.clients[client_address] = client_socket
+
         while self.running and self.is_leader:
             try:
                 data = client_socket.recv(1024)
@@ -205,9 +222,11 @@ class Server:
                         self.broadcast_message(message, client_address)
                 else:
                     break
-            except socket.error as e:
-                print(f"Error handling connection from {client_address}: {e}")
+            except socket.error:
                 break
+
+        with self.lock:
+            self.clients.pop(client_address, None)
         client_socket.close()
 
     def handle_election_message(self, message):
