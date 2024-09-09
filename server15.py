@@ -24,6 +24,8 @@ class Server:
         self.other_servers = {}
         self.election_in_progress = False
         self.leader_id = None
+        self.leader_ip = None
+        self.leader_port = None
         self.last_heartbeat = time.time()
 
     def generate_identifier(self):
@@ -57,9 +59,16 @@ class Server:
                     message = data.decode('utf-8')
                     if message == "REQUEST_CONNECTION_CLIENT":
                         print(f"Received client handshake request from {addr}")
-                        response = f"{socket.gethostbyname(socket.gethostname())}:{self.data_port}"
-                        handshake_socket.sendto(response.encode('utf-8'), addr)
-                        print(f"Sent handshake response to client: {response}")
+                        if self.is_leader:
+                            response = f"{self.leader_ip}:{self.leader_port}"
+                            handshake_socket.sendto(response.encode('utf-8'), addr)
+                            print(f"Sent handshake response to client: {response}")
+                        elif self.leader_ip and self.leader_port:
+                            response = f"{self.leader_ip}:{self.leader_port}"
+                            handshake_socket.sendto(response.encode('utf-8'), addr)
+                            print(f"Redirected client to leader: {response}")
+                        else:
+                            print("No leader available to handle client request")
                 except Exception as e:
                     print(f"Error in client handshake listener on port {port}: {e}")
 
@@ -142,13 +151,15 @@ class Server:
     def become_leader(self):
         self.is_leader = True
         self.leader_id = self.identifier
+        self.leader_ip = socket.gethostbyname(socket.gethostname())
+        self.leader_port = self.data_port
         self.election_in_progress = False
         print(f"This server (ID: {self.identifier}) is now the leader")
         for server_id, (ip, port) in self.other_servers.items():
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.connect((ip, port))
-                    s.sendall(f"COORDINATOR:{self.identifier}".encode('utf-8'))
+                    s.sendall(f"COORDINATOR:{self.identifier}:{self.leader_ip}:{self.leader_port}".encode('utf-8'))
             except:
                 print(f"Failed to send coordinator message to {server_id}")
         
@@ -177,17 +188,18 @@ class Server:
                     break
 
     def handle_connection(self, client_socket, client_address):
-        while self.running:
+        if not self.is_leader:
+            client_socket.sendall(f"REDIRECT:{self.leader_ip}:{self.leader_port}".encode('utf-8'))
+            client_socket.close()
+            return
+
+        while self.running and self.is_leader:
             try:
                 data = client_socket.recv(1024)
                 if data:
                     message = data.decode('utf-8')
-                    if message.startswith("ELECTION:"):
-                        self.handle_election_message(message)
-                    elif message.startswith("COORDINATOR:"):
-                        self.handle_coordinator_message(message)
-                    elif message.startswith("HEARTBEAT:"):
-                        self.handle_heartbeat(message)
+                    if message == "HEARTBEAT":
+                        client_socket.sendall(b"HEARTBEAT_ACK")
                     else:
                         print(f"Message from {client_address}: {message}")
                         self.broadcast_message(message, client_address)
@@ -206,12 +218,15 @@ class Server:
             self.start_election()
 
     def handle_coordinator_message(self, message):
-        _, leader_id = message.split(':')
+        _, leader_id, leader_ip, leader_port = message.split(':')
+        leader_port = int(leader_port)
         if leader_id > self.identifier:
             self.is_leader = False
             self.leader_id = leader_id
+            self.leader_ip = leader_ip
+            self.leader_port = leader_port
             self.election_in_progress = False
-            print(f"Server {leader_id} is now the leader")
+            print(f"Server {leader_id} at {leader_ip}:{leader_port} is now the leader")
         else:
             self.start_election()
 
