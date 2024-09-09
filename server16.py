@@ -9,7 +9,7 @@ DISCOVERY_PORT = 60000  # Fixed port for discovery
 CLIENT_HANDSHAKE_PORTS = [60000, 60001, 60002, 60003]  # Ports for client handshake
 HEARTBEAT_INTERVAL = 5  # Seconds between heartbeats
 HEARTBEAT_TIMEOUT = 15  # Seconds to wait before considering leader dead
-LEADER_BROADCAST_INTERVAL = 3  # Seconds between leader broadcasts
+LEADER_BROADCAST_INTERVAL = 5  # Seconds between leader broadcasts
 
 class Server:
     def __init__(self):
