@@ -15,7 +15,9 @@ BUFFER_SIZE = 1024
 MULTICAST_GROUP = '239.0.0.1'
 MULTICAST_PORT = 5000
 HEARTBEAT_INTERVAL = 5
-LEADER_TIMEOUT = 15
+LEADER_TIMEOUT = 30  # Increased from 15 to 30 seconds
+DISCOVERY_TIMEOUT = 20  # New constant for discovery timeout
+ELECTION_COOLDOWN = 10  # New constant for election cooldown
 
 class ChatServer:
     def __init__(self, server_port, lcr_port, discovery_port):
@@ -31,6 +33,8 @@ class ChatServer:
         self.last_heartbeat = 0
         self.lock = threading.Lock()
         self.shutdown_event = threading.Event()
+        self.discovery_complete = threading.Event()
+        self.last_election_time = 0
 
         # Create and bind sockets
         self.lcr_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -59,11 +63,18 @@ class ChatServer:
         threading.Thread(target=self.client_handler).start()
         threading.Thread(target=self.leader_check).start()
 
+        # Wait for initial discovery
+        time.sleep(DISCOVERY_TIMEOUT)
+        self.discovery_complete.set()
+
         self.initiate_leader_election()
 
     def server_discovery(self):
+        self.broadcast_discovery()
+        start_time = time.time()
         while not self.shutdown_event.is_set():
             try:
+                self.discovery_socket.settimeout(1)
                 data, addr = self.discovery_socket.recvfrom(BUFFER_SIZE)
                 if data == b"SERVER_DISCOVERY":
                     self.discovery_socket.sendto(f"{self.id}:{self.server_port}:{self.lcr_port}".encode(), addr)
@@ -71,10 +82,30 @@ class ChatServer:
                     server_id, server_port, lcr_port = data.decode().split(':')
                     self.known_servers.add((self.ip, int(server_port), int(lcr_port), server_id))
                     logging.info(f"Discovered server: {self.ip}:{server_port}")
+                
+                if time.time() - start_time > DISCOVERY_TIMEOUT and not self.discovery_complete.is_set():
+                    self.discovery_complete.set()
+                    logging.info("Initial discovery phase complete")
+            except socket.timeout:
+                continue
             except Exception as e:
                 logging.error(f"Error in server discovery: {e}")
 
+    def broadcast_discovery(self):
+        discovery_message = b"SERVER_DISCOVERY"
+        for port in range(5000, 6000):  # Adjust range as needed
+            if port != self.discovery_port:
+                try:
+                    self.discovery_socket.sendto(discovery_message, (self.ip, port))
+                except:
+                    pass
+
     def initiate_leader_election(self):
+        if time.time() - self.last_election_time < ELECTION_COOLDOWN:
+            logging.info("Election cooldown in effect. Skipping this election initiation.")
+            return
+
+        self.last_election_time = time.time()
         self.known_servers.add((self.ip, self.server_port, self.lcr_port, self.id))
         sorted_servers = sorted(self.known_servers, key=lambda x: x[3])
         next_server = sorted_servers[(sorted_servers.index((self.ip, self.server_port, self.lcr_port, self.id)) + 1) % len(sorted_servers)]
@@ -123,12 +154,15 @@ class ChatServer:
     def heartbeat_listener(self):
         while not self.shutdown_event.is_set():
             try:
+                self.multicast_socket.settimeout(1)
                 data, address = self.multicast_socket.recvfrom(BUFFER_SIZE)
                 message = json.loads(data.decode())
                 if message['type'] == 'HEARTBEAT':
                     self.last_heartbeat = time.time()
                 elif message['type'] == 'CHAT_UPDATE' and not self.is_leader:
                     self.chat_rooms = message['chat_rooms']
+            except socket.timeout:
+                continue
             except Exception as e:
                 logging.error(f"Error in heartbeat listener: {e}")
 
@@ -146,7 +180,7 @@ class ChatServer:
             if self.is_leader:
                 self.send_heartbeat()
                 self.replicate_chat_rooms()
-            elif time.time() - self.last_heartbeat > LEADER_TIMEOUT:
+            elif self.discovery_complete.is_set() and time.time() - self.last_heartbeat > LEADER_TIMEOUT:
                 logging.info("Leader timeout, initiating new election")
                 self.initiate_leader_election()
             time.sleep(HEARTBEAT_INTERVAL)
