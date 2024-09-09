@@ -2,7 +2,7 @@ import socket
 import threading
 import time
 import sys
-import xml.etree.ElementTree as ET
+import json
 import random
 
 # Constants
@@ -10,6 +10,7 @@ UDP_PORT = 42000
 BUFFER_SIZE = 1024
 TCP_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 6000
 HEARTBEAT_INTERVAL = 5
+HEARTBEAT_TIMEOUT = 2
 
 # Global variables
 connectedServers = {}  # Dictionary to store server information (socket: (address, unique_id))
@@ -18,30 +19,29 @@ leader = None  # Current leader (address, port, unique_id)
 isActive = True  # Server active state
 uniqueId = f"{int(time.time())}-{random.randint(0, 9999):04d}"
 shutdownEvent = threading.Event()
+serverLock = threading.Lock()
 
-def createXmlMessage(messageType, **kwargs):
-    root = ET.Element("message")
-    ET.SubElement(root, "type").text = messageType
-    for key, value in kwargs.items():
-        ET.SubElement(root, key).text = str(value)
-    return ET.tostring(root, encoding='utf-8', method='xml')
+def createJsonMessage(messageType, **kwargs):
+    message = {"type": messageType, **kwargs}
+    return json.dumps(message).encode('utf-8') + b'\n'  # Add newline as a message separator
 
-def parseXmlMessage(xmlString):
-    try:
-        root = ET.fromstring(xmlString)
-        messageType = root.find("type").text
-        data = {child.tag: child.text for child in root if child.tag != "type"}
-        return messageType, data
-    except ET.ParseError as e:
-        print(f"XML parsing error: {e}")
-        print(f"Problematic XML: {xmlString}")
-        return None, None
+def parseJsonMessages(data):
+    messages = []
+    for line in data.decode('utf-8').split('\n'):
+        if line:
+            try:
+                message = json.loads(line)
+                messages.append((message.get("type"), message))
+            except json.JSONDecodeError as e:
+                print(f"JSON parsing error: {e}")
+                print(f"Problematic JSON: {line}")
+    return messages
 
 def broadcastServerPresence():
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udpSocket:
         udpSocket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         while not shutdownEvent.is_set():
-            message = createXmlMessage("server_discovery", server_port=TCP_PORT, unique_id=uniqueId)
+            message = createJsonMessage("server_discovery", server_port=TCP_PORT, unique_id=uniqueId)
             udpSocket.sendto(message, ('<broadcast>', UDP_PORT))
             time.sleep(10)
 
@@ -52,9 +52,10 @@ def listenForServerDiscovery():
         while not shutdownEvent.is_set():
             try:
                 message, addr = udpSocket.recvfrom(BUFFER_SIZE)
-                messageType, data = parseXmlMessage(message)
-                if messageType == "server_discovery":
-                    handleServerDiscovery(addr, data)
+                messages = parseJsonMessages(message)
+                for messageType, data in messages:
+                    if messageType == "server_discovery":
+                        handleServerDiscovery(addr, data)
             except Exception as e:
                 print(f"Error in server discovery: {e}")
 
@@ -63,16 +64,19 @@ def handleServerDiscovery(addr, data):
         return
     serverId = data.get('unique_id')
     serverPort = int(data.get('server_port', 0))
-    if serverId and serverPort and serverId != uniqueId and not any(server_id == serverId for _, server_id in connectedServers.values()):
-        print(f"New server discovered: {addr[0]}:{serverPort}, ID: {serverId}")
-        connectToServer(addr[0], serverPort, serverId)
+    if serverId and serverPort and serverId != uniqueId:
+        with serverLock:
+            if not any(server_id == serverId for _, server_id in connectedServers.values()):
+                print(f"New server discovered: {addr[0]}:{serverPort}, ID: {serverId}")
+                connectToServer(addr[0], serverPort, serverId)
 
 def connectToServer(ip, port, serverId):
     try:
         serverSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         serverSocket.connect((ip, port))
-        serverSocket.send(createXmlMessage("server_connect", unique_id=uniqueId))
-        connectedServers[serverSocket] = ((ip, port), serverId)
+        serverSocket.send(createJsonMessage("server_connect", unique_id=uniqueId))
+        with serverLock:
+            connectedServers[serverSocket] = ((ip, port), serverId)
         threading.Thread(target=serverConnectionManager, args=(serverSocket, (ip, port))).start()
         print(f"Connected to server at {ip}:{port}")
         initiateLeaderElection()
@@ -81,47 +85,50 @@ def connectToServer(ip, port, serverId):
 
 def initiateLeaderElection():
     global leader
-    allServers = list(connectedServers.values()) + [((socket.gethostbyname(socket.gethostname()), TCP_PORT), uniqueId)]
-    newLeader = max(allServers, key=lambda x: x[1])
-    if newLeader[1] == uniqueId:
-        leader = (socket.gethostbyname(socket.gethostname()), TCP_PORT, uniqueId)
-    else:
-        leader = newLeader[0] + (newLeader[1],)
+    with serverLock:
+        allServers = list(connectedServers.values()) + [((socket.gethostbyname(socket.gethostname()), TCP_PORT), uniqueId)]
+        newLeader = max(allServers, key=lambda x: x[1])
+        if newLeader[1] == uniqueId:
+            leader = (socket.gethostbyname(socket.gethostname()), TCP_PORT, uniqueId)
+        else:
+            leader = newLeader[0] + (newLeader[1],)
     announceLeader()
 
 def announceLeader():
-    leaderAnnouncement = createXmlMessage("leader_announcement", leader_ip=leader[0], leader_port=str(leader[1]), leader_id=leader[2])
-    for serverSocket in list(connectedServers.keys()):
-        try:
-            serverSocket.send(leaderAnnouncement)
-        except:
-            removeServer(serverSocket)
-    for clientSocket in list(connectedClients.keys()):
-        try:
-            clientSocket.send(leaderAnnouncement)
-        except:
-            removeClient(clientSocket)
+    leaderAnnouncement = createJsonMessage("leader_announcement", leader_ip=leader[0], leader_port=leader[1], leader_id=leader[2])
+    with serverLock:
+        for serverSocket in list(connectedServers.keys()):
+            try:
+                serverSocket.send(leaderAnnouncement)
+            except:
+                removeServer(serverSocket)
+        for clientSocket in list(connectedClients.keys()):
+            try:
+                clientSocket.send(leaderAnnouncement)
+            except:
+                removeClient(clientSocket)
     print(f"Leader is {leader[0]}:{leader[1]} with ID {leader[2]}")
 
 def serverConnectionManager(serverSocket, addr):
+    buffer = b""
     while not shutdownEvent.is_set():
         try:
-            message = serverSocket.recv(BUFFER_SIZE)
-            if not message:
+            data = serverSocket.recv(BUFFER_SIZE)
+            if not data:
                 break
+            buffer += data
+            messages = parseJsonMessages(buffer)
+            buffer = b""  # Clear the buffer after processing
 
-            messageType, data = parseXmlMessage(message)
-            if messageType is None:
-                continue
-
-            if messageType == "heartbeat":
-                serverSocket.send(createXmlMessage("heartbeat_ack"))
-            elif messageType == "heartbeat_ack":
-                pass  # Heartbeat acknowledged, do nothing
-            elif messageType == "leader_announcement":
-                handleLeaderAnnouncement(data)
-            else:
-                print(f"Unknown message type received from server: {messageType}")
+            for messageType, messageData in messages:
+                if messageType == "heartbeat":
+                    serverSocket.send(createJsonMessage("heartbeat_ack"))
+                elif messageType == "heartbeat_ack":
+                    pass  # Heartbeat acknowledged, do nothing
+                elif messageType == "leader_announcement":
+                    handleLeaderAnnouncement(messageData)
+                else:
+                    print(f"Unknown message type received from server: {messageType}")
 
         except socket.timeout:
             continue
@@ -132,17 +139,18 @@ def serverConnectionManager(serverSocket, addr):
     removeServer(serverSocket)
 
 def removeServer(serverSocket):
-    if serverSocket in connectedServers:
-        addr, serverId = connectedServers[serverSocket]
-        del connectedServers[serverSocket]
-        print(f"Connection with server {addr} closed")
-        try:
-            serverSocket.close()
-        except:
-            pass
-        if (addr[0], addr[1], serverId) == leader:
-            print("Leader has disconnected. Initiating new leader election.")
-            initiateLeaderElection()
+    with serverLock:
+        if serverSocket in connectedServers:
+            addr, serverId = connectedServers[serverSocket]
+            del connectedServers[serverSocket]
+            print(f"Connection with server {addr} closed")
+            try:
+                serverSocket.close()
+            except:
+                pass
+            if leader and (addr[0], addr[1], serverId) == leader:
+                print("Leader has disconnected. Initiating new leader election.")
+                initiateLeaderElection()
 
 def handleLeaderAnnouncement(data):
     global leader
@@ -156,23 +164,24 @@ def handleLeaderAnnouncement(data):
         print(f"Received leader announcement: {leaderIp}:{leaderPort} with ID {leaderId}")
 
 def clientConnectionManager(clientSocket, addr):
+    buffer = b""
     while not shutdownEvent.is_set():
         try:
-            message = clientSocket.recv(BUFFER_SIZE)
-            if not message:
+            data = clientSocket.recv(BUFFER_SIZE)
+            if not data:
                 break
+            buffer += data
+            messages = parseJsonMessages(buffer)
+            buffer = b""  # Clear the buffer after processing
 
-            messageType, data = parseXmlMessage(message)
-            if messageType is None:
-                continue
-
-            if messageType == "chat_message":
-                broadcastChatMessage(data['name'], data['content'])
-            elif messageType == "set_name":
-                connectedClients[clientSocket] = (addr, data['name'])
-                print(f"Client {addr} set name to {data['name']}")
-            else:
-                print(f"Unknown message type received from client: {messageType}")
+            for messageType, messageData in messages:
+                if messageType == "chat_message":
+                    broadcastChatMessage(messageData['name'], messageData['content'])
+                elif messageType == "set_name":
+                    connectedClients[clientSocket] = (addr, messageData['name'])
+                    print(f"Client {addr} set name to {messageData['name']}")
+                else:
+                    print(f"Unknown message type received from client: {messageType}")
 
         except socket.timeout:
             continue
@@ -193,27 +202,29 @@ def removeClient(clientSocket):
             pass
 
 def broadcastChatMessage(senderName, content):
-    message = createXmlMessage("chat_message", sender=senderName, content=content)
-    for clientSocket in list(connectedClients.keys()):
-        try:
-            clientSocket.send(message)
-        except:
-            removeClient(clientSocket)
+    message = createJsonMessage("chat_message", sender=senderName, content=content)
+    with serverLock:
+        for clientSocket in list(connectedClients.keys()):
+            try:
+                clientSocket.send(message)
+            except:
+                removeClient(clientSocket)
 
 def heartbeatCheck():
     while not shutdownEvent.is_set():
-        for serverSocket in list(connectedServers.keys()):
-            try:
-                serverSocket.send(createXmlMessage("heartbeat"))
-                serverSocket.settimeout(2)
-                ack = serverSocket.recv(BUFFER_SIZE)
-                serverSocket.settimeout(None)
-                messageType, _ = parseXmlMessage(ack)
-                if messageType != "heartbeat_ack":
-                    raise Exception("Invalid heartbeat acknowledgement")
-            except Exception as e:
-                print(f"Server {connectedServers[serverSocket][0]} is not responding: {e}. Removing from connected servers.")
-                removeServer(serverSocket)
+        with serverLock:
+            for serverSocket in list(connectedServers.keys()):
+                try:
+                    serverSocket.send(createJsonMessage("heartbeat"))
+                    serverSocket.settimeout(HEARTBEAT_TIMEOUT)
+                    ack = serverSocket.recv(BUFFER_SIZE)
+                    serverSocket.settimeout(None)
+                    messages = parseJsonMessages(ack)
+                    if not any(messageType == "heartbeat_ack" for messageType, _ in messages):
+                        raise Exception("Invalid heartbeat acknowledgement")
+                except Exception as e:
+                    print(f"Server {connectedServers.get(serverSocket, ('Unknown', 'Unknown'))[0]} is not responding: {e}. Removing from connected servers.")
+                    removeServer(serverSocket)
         time.sleep(HEARTBEAT_INTERVAL)
 
 def main():
@@ -244,19 +255,25 @@ def main():
                 newSocket.settimeout(5)  # Set a timeout for receiving the initial message
                 message = newSocket.recv(BUFFER_SIZE)
                 newSocket.settimeout(None)  # Remove the timeout
-                messageType, data = parseXmlMessage(message)
-                if messageType == "server_connect":
-                    serverId = data['unique_id']
-                    connectedServers[newSocket] = (addr, serverId)
-                    threading.Thread(target=serverConnectionManager, args=(newSocket, addr)).start()
-                    print(f"Server connected from {addr}")
-                    initiateLeaderElection()
-                elif messageType == "client_connect":
-                    connectedClients[newSocket] = (addr, "Unknown")
-                    threading.Thread(target=clientConnectionManager, args=(newSocket, addr)).start()
-                    print(f"Client connected from {addr}")
+                messages = parseJsonMessages(message)
+                if messages:
+                    messageType, data = messages[0]  # Process only the first message
+                    if messageType == "server_connect":
+                        serverId = data['unique_id']
+                        with serverLock:
+                            connectedServers[newSocket] = (addr, serverId)
+                        threading.Thread(target=serverConnectionManager, args=(newSocket, addr)).start()
+                        print(f"Server connected from {addr}")
+                        initiateLeaderElection()
+                    elif messageType == "client_connect":
+                        connectedClients[newSocket] = (addr, "Unknown")
+                        threading.Thread(target=clientConnectionManager, args=(newSocket, addr)).start()
+                        print(f"Client connected from {addr}")
+                    else:
+                        print(f"Unknown connection type from {addr}")
+                        newSocket.close()
                 else:
-                    print(f"Unknown connection type from {addr}")
+                    print(f"No valid message received from {addr}")
                     newSocket.close()
             except Exception as e:
                 print(f"Error accepting connection: {e}")
@@ -270,12 +287,13 @@ def main():
             shutdownEvent.set()
             break
         elif cmd == '2':
-            print("Connected servers:")
-            for addr, server_id in connectedServers.values():
-                print(f"Server at {addr}, ID: {server_id}")
-            print("\nConnected clients:")
-            for addr, name in connectedClients.values():
-                print(f"Client {name} at {addr}")
+            with serverLock:
+                print("Connected servers:")
+                for addr, server_id in connectedServers.values():
+                    print(f"Server at {addr}, ID: {server_id}")
+                print("\nConnected clients:")
+                for addr, name in connectedClients.values():
+                    print(f"Client {name} at {addr}")
         elif cmd == '1':
             if leader:
                 print(f"Current leader is: {leader[0]}:{leader[1]} with ID {leader[2]}")
