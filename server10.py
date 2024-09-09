@@ -93,9 +93,15 @@ def initiateLeaderElection():
     global leader
     with serverLock:
         allServers = list(knownServers.items()) + [(uniqueId, (socket.gethostbyname(socket.gethostname()), TCP_PORT))]
-        newLeader = max(allServers, key=lambda x: x[0])
-        leader = newLeader[1] + (newLeader[0],)
-    announceLeader()
+        if allServers:
+            newLeader = max(allServers, key=lambda x: x[0])
+            new_leader = newLeader[1] + (newLeader[0],)
+            if new_leader != leader:
+                leader = new_leader
+                announceLeader()
+        else:
+            leader = (socket.gethostbyname(socket.gethostname()), TCP_PORT, uniqueId)
+            announceLeader()
 
 def announceLeader():
     leaderAnnouncement = createJsonMessage("leader_announcement", leader_ip=leader[0], leader_port=leader[1], leader_id=leader[2])
@@ -151,6 +157,7 @@ def serverConnectionManager(serverSocket, addr, serverId):
     removeServer(serverId)
 
 def removeServer(serverId):
+    global leader
     with serverLock:
         if serverId in knownServers:
             addr = knownServers[serverId]
@@ -158,6 +165,7 @@ def removeServer(serverId):
             logging.info(f"Connection with server {addr} closed")
             if leader and leader[2] == serverId:
                 logging.info("Leader has disconnected. Initiating new leader election.")
+                leader = None  # Clear the current leader
                 initiateLeaderElection()
 
 def handleLeaderAnnouncement(data):
@@ -168,8 +176,10 @@ def handleLeaderAnnouncement(data):
     leaderPort = int(data.get('leader_port', 0))
     leaderId = data.get('leader_id')
     if leaderIp and leaderPort and leaderId:
-        leader = (leaderIp, leaderPort, leaderId)
-        logging.info(f"Received leader announcement: {leaderIp}:{leaderPort} with ID {leaderId}")
+        new_leader = (leaderIp, leaderPort, leaderId)
+        if new_leader != leader:
+            leader = new_leader
+            logging.info(f"New leader announced: {leaderIp}:{leaderPort} with ID {leaderId}")
 
 def clientConnectionManager(clientSocket, addr):
     buffer = b""
@@ -235,10 +245,12 @@ def heartbeatCheck():
                     except Exception as e:
                         logging.warning(f"Server {ip}:{port} is not responding: {e}. Removing from known servers.")
                         removeServer(serverId)
+                        if leader and leader[2] == serverId:
+                            initiateLeaderElection()
         time.sleep(HEARTBEAT_INTERVAL)
 
 def main():
-    global isActive
+    global isActive, leader
 
     tcpSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     tcpSocket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -311,6 +323,7 @@ def main():
                 print(f"Current leader is: {leader[0]}:{leader[1]} with ID {leader[2]}")
             else:
                 print("No leader has been elected yet.")
+                initiateLeaderElection()
         else:
             print("Invalid command.")
 
