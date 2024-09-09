@@ -6,7 +6,8 @@ class Client:
     def __init__(self, server_ip, handshake_ports=[60000, 60001, 60002, 60003]):
         self.server_ip = server_ip
         self.handshake_ports = handshake_ports
-        self.data_port = None
+        self.leader_ip = None
+        self.leader_port = None
         self.socket = None
         self.connected = False
         self.heartbeat_interval = 1
@@ -14,24 +15,24 @@ class Client:
         self.receive_thread = None
         self.terminate = False
 
-    def connect_to_server(self):
+    def connect_to_leader(self):
         retry_count = 0
         while not self.connected and retry_count < 5:
             if self.perform_handshake():
                 try:
                     self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    self.socket.connect((self.server_ip, self.data_port))
+                    self.socket.connect((self.leader_ip, self.leader_port))
                     self.connected = True
                     self.terminate = False
-                    print(f"Connected to server at ({self.server_ip}, {self.data_port})")
+                    print(f"Connected to leader at ({self.leader_ip}, {self.leader_port})")
                     self.start_heartbeat()
                     self.start_receiving()
                     return
                 except socket.error as e:
-                    print(f"Error connecting to server: {e}. Retrying...")
+                    print(f"Error connecting to leader: {e}. Retrying...")
             retry_count += 1
             time.sleep(2)
-        print("Failed to connect to server after multiple attempts.")
+        print("Failed to connect to leader after multiple attempts.")
 
     def perform_handshake(self):
         for port in self.handshake_ports:
@@ -48,9 +49,9 @@ class Client:
                         try:
                             response, server_address = handshake_socket.recvfrom(1024)
                             server_info = response.decode('utf-8')
-                            self.server_ip, self.data_port = server_info.split(':')
-                            self.data_port = int(self.data_port)
-                            print(f"Received handshake response from {server_address}: IP {self.server_ip}, Port {self.data_port}")
+                            self.leader_ip, self.leader_port = server_info.split(':')
+                            self.leader_port = int(self.leader_port)
+                            print(f"Received handshake response from {server_address}: Leader IP {self.leader_ip}, Port {self.leader_port}")
                             return True
                         except socket.timeout:
                             print(f"No response yet on port {port}, continuing to listen...")
@@ -73,7 +74,7 @@ class Client:
                 print(f"Error sending heartbeat: {e}")
                 self.connected = False
                 self.cleanup()
-                self.connect_to_server()
+                self.connect_to_leader()
 
     def start_receiving(self):
         if self.connected:
@@ -86,18 +87,26 @@ class Client:
                 data = self.socket.recv(1024)
                 if data:
                     message = data.decode('utf-8')
-                    if message != "HEARTBEAT_ACK":
-                        print(f"Message from server: {message}")
+                    if message.startswith("REDIRECT:"):
+                        _, new_ip, new_port = message.split(':')
+                        print(f"Redirected to new leader: {new_ip}:{new_port}")
+                        self.leader_ip = new_ip
+                        self.leader_port = int(new_port)
+                        self.connected = False
+                        self.cleanup()
+                        self.connect_to_leader()
+                    elif message != "HEARTBEAT_ACK":
+                        print(f"Message from leader: {message}")
                 else:
-                    print("No data received, server may have disconnected")
+                    print("No data received, leader may have disconnected")
                     self.connected = False
                     self.cleanup()
-                    self.connect_to_server()
+                    self.connect_to_leader()
             except socket.error as e:
                 print(f"Error receiving data: {e}")
                 self.connected = False
                 self.cleanup()
-                self.connect_to_server()
+                self.connect_to_leader()
 
     def cleanup(self):
         self.terminate = True
@@ -112,21 +121,21 @@ class Client:
         if self.connected:
             try:
                 self.socket.sendall(message.encode('utf-8'))
-                print(f"Sent message to server: {message}")
+                print(f"Sent message to leader: {message}")
             except socket.error as e:
                 print(f"Error sending message: {e}")
                 self.connected = False
                 self.cleanup()
-                self.connect_to_server()
+                self.connect_to_leader()
 
     def run(self):
         try:
-            self.connect_to_server()
+            self.connect_to_leader()
             if not self.connected:
-                print("Failed to connect to any server. Exiting.")
+                print("Failed to connect to leader. Exiting.")
                 return
             while True:
-                user_input = input("Enter message to send to server (or 'exit' to quit): ")
+                user_input = input("Enter message to send to leader (or 'exit' to quit): ")
                 if user_input.lower() == 'exit':
                     break
                 self.send_message(user_input)
