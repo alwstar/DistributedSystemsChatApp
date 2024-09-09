@@ -6,6 +6,8 @@ import time
 print("Script is starting...")
 
 DISCOVERY_PORT = 60000  # Fixed port for discovery
+HEARTBEAT_INTERVAL = 5  # Seconds between heartbeats
+HEARTBEAT_TIMEOUT = 15  # Seconds to wait before considering leader dead
 
 class Server:
     def __init__(self, handshake_ports=[60001, 60002, 60003, 60004]):
@@ -21,6 +23,8 @@ class Server:
         self.identifier = self.generate_identifier()
         self.other_servers = {}
         self.election_in_progress = False
+        self.leader_id = None
+        self.last_heartbeat = time.time()
 
     def generate_identifier(self):
         timestamp = int(time.time() * 1000)  # milliseconds
@@ -116,6 +120,7 @@ class Server:
 
     def become_leader(self):
         self.is_leader = True
+        self.leader_id = self.identifier
         self.election_in_progress = False
         print(f"This server (ID: {self.identifier}) is now the leader")
         for server_id, (ip, port) in self.other_servers.items():
@@ -125,6 +130,20 @@ class Server:
                     s.sendall(f"COORDINATOR:{self.identifier}".encode('utf-8'))
             except:
                 print(f"Failed to send coordinator message to {server_id}")
+        
+        # Start sending heartbeats
+        threading.Thread(target=self.send_heartbeats, daemon=True).start()
+
+    def send_heartbeats(self):
+        while self.running and self.is_leader:
+            for server_id, (ip, port) in self.other_servers.items():
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                        s.connect((ip, port))
+                        s.sendall(f"HEARTBEAT:{self.identifier}".encode('utf-8'))
+                except:
+                    print(f"Failed to send heartbeat to {server_id}")
+            time.sleep(HEARTBEAT_INTERVAL)
 
     def accept_connections(self):
         while self.running:
@@ -146,8 +165,8 @@ class Server:
                         self.handle_election_message(message)
                     elif message.startswith("COORDINATOR:"):
                         self.handle_coordinator_message(message)
-                    elif message == "HEARTBEAT":
-                        client_socket.sendall(b"HEARTBEAT_ACK")
+                    elif message.startswith("HEARTBEAT:"):
+                        self.handle_heartbeat(message)
                     else:
                         print(f"Message from {client_address}: {message}")
                         self.broadcast_message(message, client_address)
@@ -169,10 +188,17 @@ class Server:
         _, leader_id = message.split(':')
         if leader_id > self.identifier:
             self.is_leader = False
+            self.leader_id = leader_id
             self.election_in_progress = False
             print(f"Server {leader_id} is now the leader")
         else:
             self.start_election()
+
+    def handle_heartbeat(self, message):
+        _, leader_id = message.split(':')
+        if leader_id == self.leader_id:
+            self.last_heartbeat = time.time()
+            print(f"Received heartbeat from leader {leader_id}")
 
     def broadcast_message(self, message, exclude_address=None):
         with self.lock:
@@ -183,9 +209,25 @@ class Server:
                     except socket.error:
                         self.clients.pop(client_address)
 
+    def monitor_leader(self):
+        while self.running:
+            if not self.is_leader and self.leader_id:
+                if time.time() - self.last_heartbeat > HEARTBEAT_TIMEOUT:
+                    print(f"Leader {self.leader_id} is considered dead. Starting new election.")
+                    self.leader_id = None
+                    self.start_new_election()
+            time.sleep(1)
+
+    def start_new_election(self):
+        self.other_servers.clear()
+        self.discover_servers()
+        self.start_election()
+
     def run(self):
         try:
             self.start_server()
+            monitor_thread = threading.Thread(target=self.monitor_leader, daemon=True)
+            monitor_thread.start()
             while self.running:
                 time.sleep(1)
         except KeyboardInterrupt:
