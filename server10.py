@@ -12,9 +12,9 @@ TCP_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 6000
 HEARTBEAT_INTERVAL = 5
 
 # Global variables
-connectedServers = {}  # Dictionary to store server information (socket, address, unique_id)
-connectedClients = {}  # Dictionary to store client information (socket, address, name)
-leader = None  # Current leader (address, unique_id)
+connectedServers = {}  # Dictionary to store server information (socket: (address, unique_id))
+connectedClients = {}  # Dictionary to store client information (socket: (address, name))
+leader = None  # Current leader (address, port, unique_id)
 isActive = True  # Server active state
 uniqueId = f"{int(time.time())}-{random.randint(0, 9999):04d}"
 shutdownEvent = threading.Event()
@@ -56,7 +56,7 @@ def listenForServerDiscovery():
 def handleServerDiscovery(addr, data):
     serverId = data['unique_id']
     serverPort = int(data['server_port'])
-    if serverId != uniqueId and serverId not in [server[1] for server in connectedServers.values()]:
+    if serverId != uniqueId and not any(server_id == serverId for _, server_id in connectedServers.values()):
         print(f"New server discovered: {addr[0]}:{serverPort}, ID: {serverId}")
         connectToServer(addr[0], serverPort, serverId)
 
@@ -64,6 +64,7 @@ def connectToServer(ip, port, serverId):
     try:
         serverSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         serverSocket.connect((ip, port))
+        serverSocket.send(createXmlMessage("server_connect", unique_id=uniqueId))
         connectedServers[serverSocket] = ((ip, port), serverId)
         threading.Thread(target=serverConnectionManager, args=(serverSocket, (ip, port))).start()
         print(f"Connected to server at {ip}:{port}")
@@ -76,18 +77,24 @@ def initiateLeaderElection():
     allServers = list(connectedServers.values()) + [((socket.gethostbyname(socket.gethostname()), TCP_PORT), uniqueId)]
     newLeader = max(allServers, key=lambda x: x[1])
     if newLeader[1] == uniqueId:
-        leader = (socket.gethostbyname(socket.gethostname()), uniqueId)
+        leader = (socket.gethostbyname(socket.gethostname()), TCP_PORT, uniqueId)
     else:
-        leader = newLeader
+        leader = newLeader[0] + (newLeader[1],)
     announceLeader()
 
 def announceLeader():
-    leaderAnnouncement = createXmlMessage("leader_announcement", leader_ip=leader[0][0], leader_port=str(leader[0][1]), leader_id=leader[1])
-    for serverSocket in connectedServers:
-        serverSocket.send(leaderAnnouncement)
-    for clientSocket in connectedClients:
-        clientSocket.send(leaderAnnouncement)
-    print(f"Leader is {leader[0]} with ID {leader[1]}")
+    leaderAnnouncement = createXmlMessage("leader_announcement", leader_ip=leader[0], leader_port=str(leader[1]), leader_id=leader[2])
+    for serverSocket in list(connectedServers.keys()):
+        try:
+            serverSocket.send(leaderAnnouncement)
+        except:
+            removeServer(serverSocket)
+    for clientSocket in list(connectedClients.keys()):
+        try:
+            clientSocket.send(leaderAnnouncement)
+        except:
+            removeClient(clientSocket)
+    print(f"Leader is {leader[0]}:{leader[1]} with ID {leader[2]}")
 
 def serverConnectionManager(serverSocket, addr):
     while not shutdownEvent.is_set():
@@ -99,8 +106,7 @@ def serverConnectionManager(serverSocket, addr):
             messageType, data = parseXmlMessage(message)
 
             if messageType == "heartbeat":
-                # Reset heartbeat timer for this server
-                pass
+                serverSocket.send(createXmlMessage("heartbeat_ack"))
             elif messageType == "leader_announcement":
                 handleLeaderAnnouncement(data)
             else:
@@ -110,11 +116,15 @@ def serverConnectionManager(serverSocket, addr):
             print(f"Error handling server {addr}: {e}")
             break
 
-    serverSocket.close()
-    print(f"Connection with server {addr} closed")
+    removeServer(serverSocket)
+
+def removeServer(serverSocket):
     if serverSocket in connectedServers:
+        addr, serverId = connectedServers[serverSocket]
         del connectedServers[serverSocket]
-        if addr == leader[0]:
+        print(f"Connection with server {addr} closed")
+        serverSocket.close()
+        if (addr[0], addr[1], serverId) == leader:
             print("Leader has disconnected. Initiating new leader election.")
             initiateLeaderElection()
 
@@ -123,7 +133,7 @@ def handleLeaderAnnouncement(data):
     leaderIp = data['leader_ip']
     leaderPort = int(data['leader_port'])
     leaderId = data['leader_id']
-    leader = ((leaderIp, leaderPort), leaderId)
+    leader = (leaderIp, leaderPort, leaderId)
     print(f"Received leader announcement: {leaderIp}:{leaderPort} with ID {leaderId}")
 
 def clientConnectionManager(clientSocket, addr):
@@ -147,27 +157,38 @@ def clientConnectionManager(clientSocket, addr):
             print(f"Error handling client {addr}: {e}")
             break
 
-    clientSocket.close()
-    print(f"Connection with client {addr} closed")
+    removeClient(clientSocket)
+
+def removeClient(clientSocket):
     if clientSocket in connectedClients:
+        addr, name = connectedClients[clientSocket]
         del connectedClients[clientSocket]
+        print(f"Connection with client {name} at {addr} closed")
+        clientSocket.close()
 
 def broadcastChatMessage(senderName, content):
     message = createXmlMessage("chat_message", sender=senderName, content=content)
-    for clientSocket in connectedClients:
-        clientSocket.send(message)
+    for clientSocket in list(connectedClients.keys()):
+        try:
+            clientSocket.send(message)
+        except:
+            removeClient(clientSocket)
 
 def heartbeatCheck():
     while not shutdownEvent.is_set():
         for serverSocket in list(connectedServers.keys()):
             try:
                 serverSocket.send(createXmlMessage("heartbeat"))
+                # Wait for acknowledgement (with a timeout)
+                serverSocket.settimeout(2)
+                ack = serverSocket.recv(BUFFER_SIZE)
+                serverSocket.settimeout(None)
+                messageType, _ = parseXmlMessage(ack)
+                if messageType != "heartbeat_ack":
+                    raise Exception("Invalid heartbeat acknowledgement")
             except:
                 print(f"Server {connectedServers[serverSocket][0]} is not responding. Removing from connected servers.")
-                del connectedServers[serverSocket]
-                if connectedServers[serverSocket][0] == leader[0]:
-                    print("Leader has failed. Initiating new leader election.")
-                    initiateLeaderElection()
+                removeServer(serverSocket)
         time.sleep(HEARTBEAT_INTERVAL)
 
 def main():
@@ -194,8 +215,24 @@ def main():
     def acceptConnections():
         while not shutdownEvent.is_set():
             try:
-                clientSocket, addr = tcpSocket.accept()
-                threading.Thread(target=clientConnectionManager, args=(clientSocket, addr)).start()
+                newSocket, addr = tcpSocket.accept()
+                newSocket.settimeout(5)  # Set a timeout for receiving the initial message
+                message = newSocket.recv(BUFFER_SIZE)
+                newSocket.settimeout(None)  # Remove the timeout
+                messageType, data = parseXmlMessage(message)
+                if messageType == "server_connect":
+                    serverId = data['unique_id']
+                    connectedServers[newSocket] = (addr, serverId)
+                    threading.Thread(target=serverConnectionManager, args=(newSocket, addr)).start()
+                    print(f"Server connected from {addr}")
+                    initiateLeaderElection()
+                elif messageType == "client_connect":
+                    connectedClients[newSocket] = (addr, "Unknown")
+                    threading.Thread(target=clientConnectionManager, args=(newSocket, addr)).start()
+                    print(f"Client connected from {addr}")
+                else:
+                    print(f"Unknown connection type from {addr}")
+                    newSocket.close()
             except Exception as e:
                 print(f"Error accepting connection: {e}")
 
@@ -216,7 +253,7 @@ def main():
                 print(f"Client {name} at {addr}")
         elif cmd == '1':
             if leader:
-                print(f"Current leader is: {leader[0]} with ID {leader[1]}")
+                print(f"Current leader is: {leader[0]}:{leader[1]} with ID {leader[2]}")
             else:
                 print("No leader has been elected yet.")
         else:
