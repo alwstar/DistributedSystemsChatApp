@@ -17,7 +17,7 @@ HEARTBEAT_INTERVAL = 5
 HEARTBEAT_TIMEOUT = 10
 
 # Global variables
-connectedServers = {}  # Dictionary to store server information (socket: (address, unique_id))
+knownServers = {}  # Dictionary to store all known server information (unique_id: (address, port))
 connectedClients = {}  # Dictionary to store client information (socket: (address, name))
 leader = None  # Current leader (address, port, unique_id)
 isActive = True  # Server active state
@@ -70,9 +70,12 @@ def handleServerDiscovery(addr, data):
     serverPort = int(data.get('server_port', 0))
     if serverId and serverPort and serverId != uniqueId:
         with serverLock:
-            if not any(server_id == serverId for _, server_id in connectedServers.values()):
+            if serverId not in knownServers:
+                knownServers[serverId] = (addr[0], serverPort)
                 logging.info(f"New server discovered: {addr[0]}:{serverPort}, ID: {serverId}")
-                connectToServer(addr[0], serverPort, serverId)
+                if not any(s[0] == addr[0] and s[1] == serverPort for s in knownServers.values()):
+                    connectToServer(addr[0], serverPort, serverId)
+        initiateLeaderElection()
 
 def connectToServer(ip, port, serverId):
     try:
@@ -81,33 +84,30 @@ def connectToServer(ip, port, serverId):
         serverSocket.connect((ip, port))
         serverSocket.settimeout(None)  # Remove the timeout after successful connection
         serverSocket.send(createJsonMessage("server_connect", unique_id=uniqueId))
-        with serverLock:
-            connectedServers[serverSocket] = ((ip, port), serverId)
-        threading.Thread(target=serverConnectionManager, args=(serverSocket, (ip, port))).start()
+        threading.Thread(target=serverConnectionManager, args=(serverSocket, (ip, port), serverId)).start()
         logging.info(f"Connected to server at {ip}:{port}")
-        initiateLeaderElection()
     except Exception as e:
         logging.error(f"Failed to connect to server at {ip}:{port}: {e}")
 
 def initiateLeaderElection():
     global leader
     with serverLock:
-        allServers = list(connectedServers.values()) + [((socket.gethostbyname(socket.gethostname()), TCP_PORT), uniqueId)]
-        newLeader = max(allServers, key=lambda x: x[1])
-        if newLeader[1] == uniqueId:
-            leader = (socket.gethostbyname(socket.gethostname()), TCP_PORT, uniqueId)
-        else:
-            leader = newLeader[0] + (newLeader[1],)
+        allServers = list(knownServers.items()) + [(uniqueId, (socket.gethostbyname(socket.gethostname()), TCP_PORT))]
+        newLeader = max(allServers, key=lambda x: x[0])
+        leader = newLeader[1] + (newLeader[0],)
     announceLeader()
 
 def announceLeader():
     leaderAnnouncement = createJsonMessage("leader_announcement", leader_ip=leader[0], leader_port=leader[1], leader_id=leader[2])
     with serverLock:
-        for serverSocket in list(connectedServers.keys()):
-            try:
-                serverSocket.send(leaderAnnouncement)
-            except:
-                removeServer(serverSocket)
+        for serverId, (ip, port) in knownServers.items():
+            if serverId != uniqueId:
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                        s.connect((ip, port))
+                        s.send(leaderAnnouncement)
+                except Exception as e:
+                    logging.error(f"Failed to announce leader to {ip}:{port}: {e}")
         for clientSocket in list(connectedClients.keys()):
             try:
                 clientSocket.send(leaderAnnouncement)
@@ -115,7 +115,7 @@ def announceLeader():
                 removeClient(clientSocket)
     logging.info(f"Leader is {leader[0]}:{leader[1]} with ID {leader[2]}")
 
-def serverConnectionManager(serverSocket, addr):
+def serverConnectionManager(serverSocket, addr, serverId):
     buffer = b""
     lastHeartbeat = time.time()
     while not shutdownEvent.is_set():
@@ -148,19 +148,15 @@ def serverConnectionManager(serverSocket, addr):
             logging.error(f"Error handling server {addr}: {e}")
             break
 
-    removeServer(serverSocket)
+    removeServer(serverId)
 
-def removeServer(serverSocket):
+def removeServer(serverId):
     with serverLock:
-        if serverSocket in connectedServers:
-            addr, serverId = connectedServers[serverSocket]
-            del connectedServers[serverSocket]
+        if serverId in knownServers:
+            addr = knownServers[serverId]
+            del knownServers[serverId]
             logging.info(f"Connection with server {addr} closed")
-            try:
-                serverSocket.close()
-            except:
-                pass
-            if leader and (addr[0], addr[1], serverId) == leader:
+            if leader and leader[2] == serverId:
                 logging.info("Leader has disconnected. Initiating new leader election.")
                 initiateLeaderElection()
 
@@ -225,12 +221,20 @@ def broadcastChatMessage(senderName, content):
 def heartbeatCheck():
     while not shutdownEvent.is_set():
         with serverLock:
-            for serverSocket in list(connectedServers.keys()):
-                try:
-                    serverSocket.send(createJsonMessage("heartbeat"))
-                except Exception as e:
-                    logging.warning(f"Failed to send heartbeat to {connectedServers[serverSocket][0]}: {e}")
-                    removeServer(serverSocket)
+            for serverId, (ip, port) in list(knownServers.items()):
+                if serverId != uniqueId:
+                    try:
+                        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                            s.settimeout(HEARTBEAT_TIMEOUT)
+                            s.connect((ip, port))
+                            s.send(createJsonMessage("heartbeat"))
+                            ack = s.recv(BUFFER_SIZE)
+                            messages = parseJsonMessages(ack)
+                            if not any(messageType == "heartbeat_ack" for messageType, _ in messages):
+                                raise Exception("Invalid heartbeat acknowledgement")
+                    except Exception as e:
+                        logging.warning(f"Server {ip}:{port} is not responding: {e}. Removing from known servers.")
+                        removeServer(serverId)
         time.sleep(HEARTBEAT_INTERVAL)
 
 def main():
@@ -241,6 +245,9 @@ def main():
     tcpSocket.bind(('', TCP_PORT))
     tcpSocket.listen()
     logging.info(f"TCP server listening on port {TCP_PORT}")
+
+    # Add this server to knownServers
+    knownServers[uniqueId] = (socket.gethostbyname(socket.gethostname()), TCP_PORT)
 
     broadcastThread = threading.Thread(target=broadcastServerPresence)
     broadcastThread.start()
@@ -266,9 +273,8 @@ def main():
                     messageType, data = messages[0]  # Process only the first message
                     if messageType == "server_connect":
                         serverId = data['unique_id']
-                        with serverLock:
-                            connectedServers[newSocket] = (addr, serverId)
-                        threading.Thread(target=serverConnectionManager, args=(newSocket, addr)).start()
+                        knownServers[serverId] = addr
+                        threading.Thread(target=serverConnectionManager, args=(newSocket, addr, serverId)).start()
                         logging.info(f"Server connected from {addr}")
                         initiateLeaderElection()
                     elif messageType == "client_connect":
@@ -294,9 +300,9 @@ def main():
             break
         elif cmd == '2':
             with serverLock:
-                print("Connected servers:")
-                for addr, server_id in connectedServers.values():
-                    print(f"Server at {addr}, ID: {server_id}")
+                print("Known servers:")
+                for server_id, (ip, port) in knownServers.items():
+                    print(f"Server at {ip}:{port}, ID: {server_id}")
                 print("\nConnected clients:")
                 for addr, name in connectedClients.values():
                     print(f"Client {name} at {addr}")
