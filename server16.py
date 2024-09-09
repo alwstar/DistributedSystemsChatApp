@@ -44,10 +44,6 @@ class Server:
         accept_thread.start()
         self.discover_servers()
         self.start_election()
-        
-        # Start listening for client handshake requests
-        for port in CLIENT_HANDSHAKE_PORTS:
-            threading.Thread(target=self.listen_for_client_handshake, args=(port,), daemon=True).start()
 
     def listen_for_client_handshake(self, port):
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as handshake_socket:
@@ -167,7 +163,6 @@ class Server:
         # Start sending heartbeats and leader broadcasts
         threading.Thread(target=self.send_heartbeats, daemon=True).start()
         threading.Thread(target=self.broadcast_leader_info, daemon=True).start()
-        threading.Thread(target=self.send_client_heartbeats, daemon=True).start()
 
     def send_heartbeats(self):
         while self.running and self.is_leader:
@@ -179,6 +174,19 @@ class Server:
                 except:
                     print(f"Failed to send heartbeat to {server_id}")
             time.sleep(HEARTBEAT_INTERVAL)
+
+    def broadcast_leader_info(self):
+        broadcast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        broadcast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        
+        while self.running and self.is_leader:
+            message = f"LEADER:{self.leader_id}:{self.leader_ip}:{self.leader_port}"
+            for port in CLIENT_HANDSHAKE_PORTS:
+                try:
+                    broadcast_socket.sendto(message.encode('utf-8'), ('<broadcast>', port))
+                except Exception as e:
+                    print(f"Error broadcasting leader info on port {port}: {e}")
+            time.sleep(LEADER_BROADCAST_INTERVAL)
 
     def send_client_heartbeats(self):
         while self.running and self.is_leader:
@@ -197,36 +205,31 @@ class Server:
                 client_socket, client_address = self.server_socket.accept()
                 threading.Thread(target=self.handle_connection, args=(client_socket, client_address)).start()
             except Exception as e:
-                print(f"Error accepting connection: {e}")
-                if not self.running:
-                    break
+                if self.running:
+                    print(f"Error accepting connection: {e}")
+                else:
+                    break  # Server is shutting down, exit the loop
 
     def handle_connection(self, client_socket, client_address):
-        if not self.is_leader:
-            client_socket.sendall(f"REDIRECT:{self.leader_ip}:{self.leader_port}".encode('utf-8'))
-            client_socket.close()
-            return
-
-        with self.lock:
-            self.clients[client_address] = client_socket
-
-        while self.running and self.is_leader:
+        while self.running:
             try:
                 data = client_socket.recv(1024)
                 if data:
                     message = data.decode('utf-8')
-                    if message == "HEARTBEAT":
-                        client_socket.sendall(b"HEARTBEAT_ACK")
+                    if message.startswith("ELECTION:"):
+                        self.handle_election_message(message)
+                    elif message.startswith("COORDINATOR:"):
+                        self.handle_coordinator_message(message)
+                    elif message.startswith("HEARTBEAT:"):
+                        self.handle_heartbeat(message)
                     else:
                         print(f"Message from {client_address}: {message}")
                         self.broadcast_message(message, client_address)
                 else:
                     break
-            except socket.error:
+            except socket.error as e:
+                print(f"Error handling connection from {client_address}: {e}")
                 break
-
-        with self.lock:
-            self.clients.pop(client_address, None)
         client_socket.close()
 
     def handle_election_message(self, message):
@@ -250,10 +253,9 @@ class Server:
             self.start_election()
 
     def handle_heartbeat(self, message):
-        _, leader_id = message.split(':')
-        if leader_id == self.leader_id:
-            self.last_heartbeat = time.time()
-            print(f"Received heartbeat from leader {leader_id}")
+        _, sender_id = message.split(':')
+        print(f"Received heartbeat from {sender_id}")
+        self.last_heartbeat = time.time()
 
     def broadcast_message(self, message, exclude_address=None):
         with self.lock:
@@ -281,8 +283,6 @@ class Server:
     def run(self):
         try:
             self.start_server()
-            monitor_thread = threading.Thread(target=self.monitor_leader, daemon=True)
-            monitor_thread.start()
             while self.running:
                 time.sleep(1)
         except KeyboardInterrupt:
