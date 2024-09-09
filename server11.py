@@ -108,34 +108,45 @@ class ChatServer:
         self.last_election_time = time.time()
         self.known_servers.add((self.ip, self.server_port, self.lcr_port, self.id))
         sorted_servers = sorted(self.known_servers, key=lambda x: x[3])
-        next_server = sorted_servers[(sorted_servers.index((self.ip, self.server_port, self.lcr_port, self.id)) + 1) % len(sorted_servers)]
         
-        message = json.dumps({"type": "ELECTION", "id": self.id}).encode()
-        self.lcr_socket.sendto(message, (next_server[0], next_server[2]))
-        logging.info("Initiated leader election")
+        # Start with self as potential leader
+        potential_leader = self.id
+        
+        for server in sorted_servers:
+            if server[3] > potential_leader:
+                potential_leader = server[3]
+        
+        if potential_leader == self.id:
+            self.become_leader()
+        else:
+            self.leader_id = potential_leader
+            self.is_leader = False
+            logging.info(f"New leader elected: {self.leader_id}")
+
+        # Broadcast the leader information to all known servers
+        self.broadcast_leader_info()
+
+    def broadcast_leader_info(self):
+        message = json.dumps({"type": "LEADER", "id": self.leader_id}).encode()
+        for server in self.known_servers:
+            try:
+                self.lcr_socket.sendto(message, (server[0], server[2]))
+            except Exception as e:
+                logging.error(f"Error sending leader info to {server}: {e}")
 
     def lcr_listener(self):
         while not self.shutdown_event.is_set():
             try:
+                self.lcr_socket.settimeout(1)
                 data, addr = self.lcr_socket.recvfrom(BUFFER_SIZE)
                 message = json.loads(data.decode())
-                if message["type"] == "ELECTION":
-                    if message["id"] > self.id:
-                        next_server = self.get_next_server()
-                        self.lcr_socket.sendto(data, (next_server[0], next_server[2]))
-                    elif message["id"] < self.id:
-                        next_server = self.get_next_server()
-                        new_message = json.dumps({"type": "ELECTION", "id": self.id}).encode()
-                        self.lcr_socket.sendto(new_message, (next_server[0], next_server[2]))
-                    else:
-                        self.become_leader()
-                elif message["type"] == "LEADER":
+                if message["type"] == "LEADER":
                     self.leader_id = message["id"]
                     self.is_leader = (self.id == self.leader_id)
-                    if not self.is_leader:
-                        next_server = self.get_next_server()
-                        self.lcr_socket.sendto(data, (next_server[0], next_server[2]))
-                    logging.info(f"New leader elected: {self.leader_id}")
+                    logging.info(f"Received leader announcement: {self.leader_id}")
+                    self.last_heartbeat = time.time()  # Reset heartbeat timer
+            except socket.timeout:
+                continue
             except Exception as e:
                 logging.error(f"Error in LCR listener: {e}")
 
@@ -146,10 +157,8 @@ class ChatServer:
     def become_leader(self):
         self.is_leader = True
         self.leader_id = self.id
-        next_server = self.get_next_server()
-        message = json.dumps({"type": "LEADER", "id": self.id}).encode()
-        self.lcr_socket.sendto(message, (next_server[0], next_server[2]))
         logging.info("Became the leader")
+        self.broadcast_leader_info()
 
     def heartbeat_listener(self):
         while not self.shutdown_event.is_set():
@@ -173,7 +182,10 @@ class ChatServer:
             'id': self.id,
             'timestamp': time.time()
         })
-        self.multicast_socket.sendto(message.encode(), multicast_group)
+        try:
+            self.multicast_socket.sendto(message.encode(), multicast_group)
+        except Exception as e:
+            logging.error(f"Error sending heartbeat: {e}")
 
     def leader_check(self):
         while not self.shutdown_event.is_set():
