@@ -6,12 +6,12 @@ import time
 print("Script is starting...")
 
 DISCOVERY_PORT = 60000  # Fixed port for discovery
+CLIENT_HANDSHAKE_PORTS = [60000, 60001, 60002, 60003]  # Ports for client handshake
 HEARTBEAT_INTERVAL = 5  # Seconds between heartbeats
 HEARTBEAT_TIMEOUT = 15  # Seconds to wait before considering leader dead
 
 class Server:
-    def __init__(self, handshake_ports=[60001, 60002, 60003, 60004]):
-        self.handshake_ports = handshake_ports
+    def __init__(self):
         self.data_port = self.get_random_port(49152, 59999)
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.bind(('0.0.0.0', self.data_port))
@@ -41,6 +41,27 @@ class Server:
         accept_thread.start()
         self.discover_servers()
         self.start_election()
+        
+        # Start listening for client handshake requests
+        for port in CLIENT_HANDSHAKE_PORTS:
+            threading.Thread(target=self.listen_for_client_handshake, args=(port,), daemon=True).start()
+
+    def listen_for_client_handshake(self, port):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as handshake_socket:
+            handshake_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            handshake_socket.bind(('0.0.0.0', port))
+            print(f"Listening for client handshakes on port {port}")
+            while self.running:
+                try:
+                    data, addr = handshake_socket.recvfrom(1024)
+                    message = data.decode('utf-8')
+                    if message == "REQUEST_CONNECTION_CLIENT":
+                        print(f"Received client handshake request from {addr}")
+                        response = f"{socket.gethostbyname(socket.gethostname())}:{self.data_port}"
+                        handshake_socket.sendto(response.encode('utf-8'), addr)
+                        print(f"Sent handshake response to client: {response}")
+                except Exception as e:
+                    print(f"Error in client handshake listener on port {port}: {e}")
 
     def discover_servers(self):
         print("Starting server discovery phase...")
