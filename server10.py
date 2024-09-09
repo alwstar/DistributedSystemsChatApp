@@ -24,13 +24,18 @@ def createXmlMessage(messageType, **kwargs):
     ET.SubElement(root, "type").text = messageType
     for key, value in kwargs.items():
         ET.SubElement(root, key).text = str(value)
-    return ET.tostring(root)
+    return ET.tostring(root, encoding='utf-8', method='xml')
 
 def parseXmlMessage(xmlString):
-    root = ET.fromstring(xmlString)
-    messageType = root.find("type").text
-    data = {child.tag: child.text for child in root if child.tag != "type"}
-    return messageType, data
+    try:
+        root = ET.fromstring(xmlString)
+        messageType = root.find("type").text
+        data = {child.tag: child.text for child in root if child.tag != "type"}
+        return messageType, data
+    except ET.ParseError as e:
+        print(f"XML parsing error: {e}")
+        print(f"Problematic XML: {xmlString}")
+        return None, None
 
 def broadcastServerPresence():
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udpSocket:
@@ -54,9 +59,11 @@ def listenForServerDiscovery():
                 print(f"Error in server discovery: {e}")
 
 def handleServerDiscovery(addr, data):
-    serverId = data['unique_id']
-    serverPort = int(data['server_port'])
-    if serverId != uniqueId and not any(server_id == serverId for _, server_id in connectedServers.values()):
+    if data is None:
+        return
+    serverId = data.get('unique_id')
+    serverPort = int(data.get('server_port', 0))
+    if serverId and serverPort and serverId != uniqueId and not any(server_id == serverId for _, server_id in connectedServers.values()):
         print(f"New server discovered: {addr[0]}:{serverPort}, ID: {serverId}")
         connectToServer(addr[0], serverPort, serverId)
 
@@ -104,14 +111,20 @@ def serverConnectionManager(serverSocket, addr):
                 break
 
             messageType, data = parseXmlMessage(message)
+            if messageType is None:
+                continue
 
             if messageType == "heartbeat":
                 serverSocket.send(createXmlMessage("heartbeat_ack"))
+            elif messageType == "heartbeat_ack":
+                pass  # Heartbeat acknowledged, do nothing
             elif messageType == "leader_announcement":
                 handleLeaderAnnouncement(data)
             else:
                 print(f"Unknown message type received from server: {messageType}")
 
+        except socket.timeout:
+            continue
         except Exception as e:
             print(f"Error handling server {addr}: {e}")
             break
@@ -123,18 +136,24 @@ def removeServer(serverSocket):
         addr, serverId = connectedServers[serverSocket]
         del connectedServers[serverSocket]
         print(f"Connection with server {addr} closed")
-        serverSocket.close()
+        try:
+            serverSocket.close()
+        except:
+            pass
         if (addr[0], addr[1], serverId) == leader:
             print("Leader has disconnected. Initiating new leader election.")
             initiateLeaderElection()
 
 def handleLeaderAnnouncement(data):
     global leader
-    leaderIp = data['leader_ip']
-    leaderPort = int(data['leader_port'])
-    leaderId = data['leader_id']
-    leader = (leaderIp, leaderPort, leaderId)
-    print(f"Received leader announcement: {leaderIp}:{leaderPort} with ID {leaderId}")
+    if data is None:
+        return
+    leaderIp = data.get('leader_ip')
+    leaderPort = int(data.get('leader_port', 0))
+    leaderId = data.get('leader_id')
+    if leaderIp and leaderPort and leaderId:
+        leader = (leaderIp, leaderPort, leaderId)
+        print(f"Received leader announcement: {leaderIp}:{leaderPort} with ID {leaderId}")
 
 def clientConnectionManager(clientSocket, addr):
     while not shutdownEvent.is_set():
@@ -144,6 +163,8 @@ def clientConnectionManager(clientSocket, addr):
                 break
 
             messageType, data = parseXmlMessage(message)
+            if messageType is None:
+                continue
 
             if messageType == "chat_message":
                 broadcastChatMessage(data['name'], data['content'])
@@ -153,6 +174,8 @@ def clientConnectionManager(clientSocket, addr):
             else:
                 print(f"Unknown message type received from client: {messageType}")
 
+        except socket.timeout:
+            continue
         except Exception as e:
             print(f"Error handling client {addr}: {e}")
             break
@@ -164,7 +187,10 @@ def removeClient(clientSocket):
         addr, name = connectedClients[clientSocket]
         del connectedClients[clientSocket]
         print(f"Connection with client {name} at {addr} closed")
-        clientSocket.close()
+        try:
+            clientSocket.close()
+        except:
+            pass
 
 def broadcastChatMessage(senderName, content):
     message = createXmlMessage("chat_message", sender=senderName, content=content)
@@ -179,15 +205,14 @@ def heartbeatCheck():
         for serverSocket in list(connectedServers.keys()):
             try:
                 serverSocket.send(createXmlMessage("heartbeat"))
-                # Wait for acknowledgement (with a timeout)
                 serverSocket.settimeout(2)
                 ack = serverSocket.recv(BUFFER_SIZE)
                 serverSocket.settimeout(None)
                 messageType, _ = parseXmlMessage(ack)
                 if messageType != "heartbeat_ack":
                     raise Exception("Invalid heartbeat acknowledgement")
-            except:
-                print(f"Server {connectedServers[serverSocket][0]} is not responding. Removing from connected servers.")
+            except Exception as e:
+                print(f"Server {connectedServers[serverSocket][0]} is not responding: {e}. Removing from connected servers.")
                 removeServer(serverSocket)
         time.sleep(HEARTBEAT_INTERVAL)
 
