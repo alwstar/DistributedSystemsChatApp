@@ -31,6 +31,27 @@ class ChatServer:
         self.lock = threading.Lock()
         self.shutdown_event = threading.Event()
 
+        # Create and bind sockets
+        self.lcr_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.lcr_socket.bind((self.ip, LCR_PORT))
+
+        self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.client_socket.bind((self.ip, SERVER_PORT))
+        self.client_socket.listen()
+
+        self.discovery_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.discovery_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.discovery_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        self.discovery_socket.bind(('', DISCOVERY_PORT))
+
+        # Multicast socket setup
+        self.multicast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.multicast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.multicast_socket.bind(('', MULTICAST_PORT))
+        group = socket.inet_aton(MULTICAST_GROUP)
+        mreq = struct.pack('4sL', group, socket.INADDR_ANY)
+        self.multicast_socket.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+
     def start(self):
         threading.Thread(target=self.server_discovery).start()
         threading.Thread(target=self.lcr_listener).start()
@@ -41,55 +62,50 @@ class ChatServer:
         self.initiate_leader_election()
 
     def server_discovery(self):
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            s.bind(('', DISCOVERY_PORT))
-            while not self.shutdown_event.is_set():
-                try:
-                    data, addr = s.recvfrom(BUFFER_SIZE)
-                    if data == b"SERVER_DISCOVERY":
-                        s.sendto(self.id.encode(), addr)
-                    elif addr[0] != self.ip:
-                        self.known_servers.add((addr[0], data.decode()))
-                        logging.info(f"Discovered server: {addr[0]}")
-                except Exception as e:
-                    logging.error(f"Error in server discovery: {e}")
+        while not self.shutdown_event.is_set():
+            try:
+                data, addr = self.discovery_socket.recvfrom(BUFFER_SIZE)
+                if data == b"SERVER_DISCOVERY":
+                    self.discovery_socket.sendto(self.id.encode(), addr)
+                elif addr[0] != self.ip:
+                    self.known_servers.add((addr[0], data.decode()))
+                    logging.info(f"Discovered server: {addr[0]}")
+            except Exception as e:
+                logging.error(f"Error in server discovery: {e}")
 
     def initiate_leader_election(self):
         self.known_servers.add((self.ip, self.id))
         sorted_servers = sorted(self.known_servers, key=lambda x: x[1])
         next_server = sorted_servers[(sorted_servers.index((self.ip, self.id)) + 1) % len(sorted_servers)]
         
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.sendto(json.dumps({"type": "ELECTION", "id": self.id}).encode(), (next_server[0], LCR_PORT))
+        message = json.dumps({"type": "ELECTION", "id": self.id}).encode()
+        self.lcr_socket.sendto(message, (next_server[0], LCR_PORT))
         logging.info("Initiated leader election")
 
     def lcr_listener(self):
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.bind((self.ip, LCR_PORT))
-            while not self.shutdown_event.is_set():
-                try:
-                    data, addr = s.recvfrom(BUFFER_SIZE)
-                    message = json.loads(data.decode())
-                    if message["type"] == "ELECTION":
-                        if message["id"] > self.id:
-                            next_server = self.get_next_server()
-                            s.sendto(data, (next_server[0], LCR_PORT))
-                        elif message["id"] < self.id:
-                            next_server = self.get_next_server()
-                            s.sendto(json.dumps({"type": "ELECTION", "id": self.id}).encode(), (next_server[0], LCR_PORT))
-                        else:
-                            self.become_leader()
-                    elif message["type"] == "LEADER":
-                        self.leader_id = message["id"]
-                        self.is_leader = (self.id == self.leader_id)
-                        if not self.is_leader:
-                            next_server = self.get_next_server()
-                            s.sendto(data, (next_server[0], LCR_PORT))
-                        logging.info(f"New leader elected: {self.leader_id}")
-                except Exception as e:
-                    logging.error(f"Error in LCR listener: {e}")
+        while not self.shutdown_event.is_set():
+            try:
+                data, addr = self.lcr_socket.recvfrom(BUFFER_SIZE)
+                message = json.loads(data.decode())
+                if message["type"] == "ELECTION":
+                    if message["id"] > self.id:
+                        next_server = self.get_next_server()
+                        self.lcr_socket.sendto(data, (next_server[0], LCR_PORT))
+                    elif message["id"] < self.id:
+                        next_server = self.get_next_server()
+                        new_message = json.dumps({"type": "ELECTION", "id": self.id}).encode()
+                        self.lcr_socket.sendto(new_message, (next_server[0], LCR_PORT))
+                    else:
+                        self.become_leader()
+                elif message["type"] == "LEADER":
+                    self.leader_id = message["id"]
+                    self.is_leader = (self.id == self.leader_id)
+                    if not self.is_leader:
+                        next_server = self.get_next_server()
+                        self.lcr_socket.sendto(data, (next_server[0], LCR_PORT))
+                    logging.info(f"New leader elected: {self.leader_id}")
+            except Exception as e:
+                logging.error(f"Error in LCR listener: {e}")
 
     def get_next_server(self):
         sorted_servers = sorted(self.known_servers, key=lambda x: x[1])
@@ -99,22 +115,14 @@ class ChatServer:
         self.is_leader = True
         self.leader_id = self.id
         next_server = self.get_next_server()
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.sendto(json.dumps({"type": "LEADER", "id": self.id}).encode(), (next_server[0], LCR_PORT))
+        message = json.dumps({"type": "LEADER", "id": self.id}).encode()
+        self.lcr_socket.sendto(message, (next_server[0], LCR_PORT))
         logging.info("Became the leader")
 
     def heartbeat_listener(self):
-        multicast_group = MULTICAST_GROUP
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(('', MULTICAST_PORT))
-        group = socket.inet_aton(multicast_group)
-        mreq = struct.pack('4sL', group, socket.INADDR_ANY)
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-        
         while not self.shutdown_event.is_set():
             try:
-                data, address = sock.recvfrom(BUFFER_SIZE)
+                data, address = self.multicast_socket.recvfrom(BUFFER_SIZE)
                 message = json.loads(data.decode())
                 if message['type'] == 'HEARTBEAT':
                     self.last_heartbeat = time.time()
@@ -125,16 +133,12 @@ class ChatServer:
 
     def send_heartbeat(self):
         multicast_group = (MULTICAST_GROUP, MULTICAST_PORT)
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.settimeout(0.2)
-            ttl = struct.pack('b', 1)
-            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
-            message = json.dumps({
-                'type': 'HEARTBEAT',
-                'id': self.id,
-                'timestamp': time.time()
-            })
-            sock.sendto(message.encode(), multicast_group)
+        message = json.dumps({
+            'type': 'HEARTBEAT',
+            'id': self.id,
+            'timestamp': time.time()
+        })
+        self.multicast_socket.sendto(message.encode(), multicast_group)
 
     def leader_check(self):
         while not self.shutdown_event.is_set():
@@ -148,25 +152,19 @@ class ChatServer:
 
     def replicate_chat_rooms(self):
         multicast_group = (MULTICAST_GROUP, MULTICAST_PORT)
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            ttl = struct.pack('b', 1)
-            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
-            message = json.dumps({
-                'type': 'CHAT_UPDATE',
-                'chat_rooms': self.chat_rooms
-            })
-            sock.sendto(message.encode(), multicast_group)
+        message = json.dumps({
+            'type': 'CHAT_UPDATE',
+            'chat_rooms': self.chat_rooms
+        })
+        self.multicast_socket.sendto(message.encode(), multicast_group)
 
     def client_handler(self):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind((self.ip, SERVER_PORT))
-            s.listen()
-            while not self.shutdown_event.is_set():
-                try:
-                    conn, addr = s.accept()
-                    threading.Thread(target=self.handle_client, args=(conn, addr)).start()
-                except Exception as e:
-                    logging.error(f"Error accepting client connection: {e}")
+        while not self.shutdown_event.is_set():
+            try:
+                conn, addr = self.client_socket.accept()
+                threading.Thread(target=self.handle_client, args=(conn, addr)).start()
+            except Exception as e:
+                logging.error(f"Error accepting client connection: {e}")
 
     def handle_client(self, conn, addr):
         with conn:
@@ -205,6 +203,10 @@ class ChatServer:
 
     def shutdown(self):
         self.shutdown_event.set()
+        self.lcr_socket.close()
+        self.client_socket.close()
+        self.discovery_socket.close()
+        self.multicast_socket.close()
         logging.info("Server shutting down")
 
 if __name__ == "__main__":
