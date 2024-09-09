@@ -4,13 +4,17 @@ import time
 import sys
 import json
 import random
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Constants
 UDP_PORT = 42000
 BUFFER_SIZE = 1024
 TCP_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 6000
 HEARTBEAT_INTERVAL = 5
-HEARTBEAT_TIMEOUT = 2
+HEARTBEAT_TIMEOUT = 10
 
 # Global variables
 connectedServers = {}  # Dictionary to store server information (socket: (address, unique_id))
@@ -33,8 +37,8 @@ def parseJsonMessages(data):
                 message = json.loads(line)
                 messages.append((message.get("type"), message))
             except json.JSONDecodeError as e:
-                print(f"JSON parsing error: {e}")
-                print(f"Problematic JSON: {line}")
+                logging.error(f"JSON parsing error: {e}")
+                logging.error(f"Problematic JSON: {line}")
     return messages
 
 def broadcastServerPresence():
@@ -57,7 +61,7 @@ def listenForServerDiscovery():
                     if messageType == "server_discovery":
                         handleServerDiscovery(addr, data)
             except Exception as e:
-                print(f"Error in server discovery: {e}")
+                logging.error(f"Error in server discovery: {e}")
 
 def handleServerDiscovery(addr, data):
     if data is None:
@@ -67,21 +71,23 @@ def handleServerDiscovery(addr, data):
     if serverId and serverPort and serverId != uniqueId:
         with serverLock:
             if not any(server_id == serverId for _, server_id in connectedServers.values()):
-                print(f"New server discovered: {addr[0]}:{serverPort}, ID: {serverId}")
+                logging.info(f"New server discovered: {addr[0]}:{serverPort}, ID: {serverId}")
                 connectToServer(addr[0], serverPort, serverId)
 
 def connectToServer(ip, port, serverId):
     try:
         serverSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        serverSocket.settimeout(5)  # Set a timeout for the connection attempt
         serverSocket.connect((ip, port))
+        serverSocket.settimeout(None)  # Remove the timeout after successful connection
         serverSocket.send(createJsonMessage("server_connect", unique_id=uniqueId))
         with serverLock:
             connectedServers[serverSocket] = ((ip, port), serverId)
         threading.Thread(target=serverConnectionManager, args=(serverSocket, (ip, port))).start()
-        print(f"Connected to server at {ip}:{port}")
+        logging.info(f"Connected to server at {ip}:{port}")
         initiateLeaderElection()
     except Exception as e:
-        print(f"Failed to connect to server at {ip}:{port}: {e}")
+        logging.error(f"Failed to connect to server at {ip}:{port}: {e}")
 
 def initiateLeaderElection():
     global leader
@@ -107,33 +113,39 @@ def announceLeader():
                 clientSocket.send(leaderAnnouncement)
             except:
                 removeClient(clientSocket)
-    print(f"Leader is {leader[0]}:{leader[1]} with ID {leader[2]}")
+    logging.info(f"Leader is {leader[0]}:{leader[1]} with ID {leader[2]}")
 
 def serverConnectionManager(serverSocket, addr):
     buffer = b""
+    lastHeartbeat = time.time()
     while not shutdownEvent.is_set():
         try:
+            serverSocket.settimeout(1)  # Short timeout to allow for regular checks
             data = serverSocket.recv(BUFFER_SIZE)
-            if not data:
-                break
-            buffer += data
-            messages = parseJsonMessages(buffer)
-            buffer = b""  # Clear the buffer after processing
+            if data:
+                buffer += data
+                messages = parseJsonMessages(buffer)
+                buffer = b""  # Clear the buffer after processing
 
-            for messageType, messageData in messages:
-                if messageType == "heartbeat":
-                    serverSocket.send(createJsonMessage("heartbeat_ack"))
-                elif messageType == "heartbeat_ack":
-                    pass  # Heartbeat acknowledged, do nothing
-                elif messageType == "leader_announcement":
-                    handleLeaderAnnouncement(messageData)
-                else:
-                    print(f"Unknown message type received from server: {messageType}")
+                for messageType, messageData in messages:
+                    if messageType == "heartbeat":
+                        lastHeartbeat = time.time()
+                        serverSocket.send(createJsonMessage("heartbeat_ack"))
+                    elif messageType == "heartbeat_ack":
+                        lastHeartbeat = time.time()
+                    elif messageType == "leader_announcement":
+                        handleLeaderAnnouncement(messageData)
+                    else:
+                        logging.warning(f"Unknown message type received from server: {messageType}")
+            
+            # Check if heartbeat has timed out
+            if time.time() - lastHeartbeat > HEARTBEAT_TIMEOUT:
+                raise Exception("Heartbeat timeout")
 
         except socket.timeout:
             continue
         except Exception as e:
-            print(f"Error handling server {addr}: {e}")
+            logging.error(f"Error handling server {addr}: {e}")
             break
 
     removeServer(serverSocket)
@@ -143,13 +155,13 @@ def removeServer(serverSocket):
         if serverSocket in connectedServers:
             addr, serverId = connectedServers[serverSocket]
             del connectedServers[serverSocket]
-            print(f"Connection with server {addr} closed")
+            logging.info(f"Connection with server {addr} closed")
             try:
                 serverSocket.close()
             except:
                 pass
             if leader and (addr[0], addr[1], serverId) == leader:
-                print("Leader has disconnected. Initiating new leader election.")
+                logging.info("Leader has disconnected. Initiating new leader election.")
                 initiateLeaderElection()
 
 def handleLeaderAnnouncement(data):
@@ -161,7 +173,7 @@ def handleLeaderAnnouncement(data):
     leaderId = data.get('leader_id')
     if leaderIp and leaderPort and leaderId:
         leader = (leaderIp, leaderPort, leaderId)
-        print(f"Received leader announcement: {leaderIp}:{leaderPort} with ID {leaderId}")
+        logging.info(f"Received leader announcement: {leaderIp}:{leaderPort} with ID {leaderId}")
 
 def clientConnectionManager(clientSocket, addr):
     buffer = b""
@@ -179,14 +191,14 @@ def clientConnectionManager(clientSocket, addr):
                     broadcastChatMessage(messageData['name'], messageData['content'])
                 elif messageType == "set_name":
                     connectedClients[clientSocket] = (addr, messageData['name'])
-                    print(f"Client {addr} set name to {messageData['name']}")
+                    logging.info(f"Client {addr} set name to {messageData['name']}")
                 else:
-                    print(f"Unknown message type received from client: {messageType}")
+                    logging.warning(f"Unknown message type received from client: {messageType}")
 
         except socket.timeout:
             continue
         except Exception as e:
-            print(f"Error handling client {addr}: {e}")
+            logging.error(f"Error handling client {addr}: {e}")
             break
 
     removeClient(clientSocket)
@@ -195,7 +207,7 @@ def removeClient(clientSocket):
     if clientSocket in connectedClients:
         addr, name = connectedClients[clientSocket]
         del connectedClients[clientSocket]
-        print(f"Connection with client {name} at {addr} closed")
+        logging.info(f"Connection with client {name} at {addr} closed")
         try:
             clientSocket.close()
         except:
@@ -216,14 +228,8 @@ def heartbeatCheck():
             for serverSocket in list(connectedServers.keys()):
                 try:
                     serverSocket.send(createJsonMessage("heartbeat"))
-                    serverSocket.settimeout(HEARTBEAT_TIMEOUT)
-                    ack = serverSocket.recv(BUFFER_SIZE)
-                    serverSocket.settimeout(None)
-                    messages = parseJsonMessages(ack)
-                    if not any(messageType == "heartbeat_ack" for messageType, _ in messages):
-                        raise Exception("Invalid heartbeat acknowledgement")
                 except Exception as e:
-                    print(f"Server {connectedServers.get(serverSocket, ('Unknown', 'Unknown'))[0]} is not responding: {e}. Removing from connected servers.")
+                    logging.warning(f"Failed to send heartbeat to {connectedServers[serverSocket][0]}: {e}")
                     removeServer(serverSocket)
         time.sleep(HEARTBEAT_INTERVAL)
 
@@ -234,7 +240,7 @@ def main():
     tcpSocket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     tcpSocket.bind(('', TCP_PORT))
     tcpSocket.listen()
-    print(f"TCP server listening on port {TCP_PORT}")
+    logging.info(f"TCP server listening on port {TCP_PORT}")
 
     broadcastThread = threading.Thread(target=broadcastServerPresence)
     broadcastThread.start()
@@ -263,20 +269,20 @@ def main():
                         with serverLock:
                             connectedServers[newSocket] = (addr, serverId)
                         threading.Thread(target=serverConnectionManager, args=(newSocket, addr)).start()
-                        print(f"Server connected from {addr}")
+                        logging.info(f"Server connected from {addr}")
                         initiateLeaderElection()
                     elif messageType == "client_connect":
                         connectedClients[newSocket] = (addr, "Unknown")
                         threading.Thread(target=clientConnectionManager, args=(newSocket, addr)).start()
-                        print(f"Client connected from {addr}")
+                        logging.info(f"Client connected from {addr}")
                     else:
-                        print(f"Unknown connection type from {addr}")
+                        logging.warning(f"Unknown connection type from {addr}")
                         newSocket.close()
                 else:
-                    print(f"No valid message received from {addr}")
+                    logging.warning(f"No valid message received from {addr}")
                     newSocket.close()
             except Exception as e:
-                print(f"Error accepting connection: {e}")
+                logging.error(f"Error accepting connection: {e}")
 
     connectionThread = threading.Thread(target=acceptConnections)
     connectionThread.start()
