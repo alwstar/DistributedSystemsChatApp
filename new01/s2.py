@@ -8,20 +8,27 @@ import sys
 # Constants
 UDP_PORT = 42000
 TCP_BASE_PORT = 6001
+CLIENT_LISTEN_PORT = 5000
+CLIENT_SEND_PORT = 5001
+CLIENT_RECEIVE_PORT = 5002
 BUFFER_SIZE = 1024
-SEARCH_TIME = 10  # Time to search for other servers
-ELECTION_TIMEOUT = 5  # Timeout for election process
-CONNECTION_TIMEOUT = 5  # Timeout for initial connection
+SEARCH_TIME = 10
+ELECTION_TIMEOUT = 15
+CONNECTION_TIMEOUT = 10
+HEARTBEAT_INTERVAL = 5
+LEADER_CHECK_INTERVAL = 10
 
 # Global variables
 server_id = f"SERVER_{random.randint(1000, 9999)}"
 tcp_port = None
 connected_servers = {}
+connected_clients = {}
 leader = None
 is_active = True
 shutdown_event = threading.Event()
 ring_formed = threading.Event()
 election_in_progress = threading.Event()
+all_servers_ready = threading.Event()
 
 def create_json_message(message_type, **kwargs):
     return json.dumps({"type": message_type, **kwargs}).encode()
@@ -59,7 +66,7 @@ def listen_for_broadcasts():
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
         udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         udp_socket.bind(('', UDP_PORT))
-        udp_socket.settimeout(1)  # Set a timeout for the socket
+        udp_socket.settimeout(1)
         print(f"Listening for broadcasts on UDP port {UDP_PORT}")
         end_time = time.time() + SEARCH_TIME
         while time.time() < end_time and not shutdown_event.is_set():
@@ -89,6 +96,7 @@ def connect_to_server(ip, port, remote_server_id):
                 connected_servers[remote_server_id] = {'socket': server_socket, 'address': ip, 'port': port}
                 print(f"Successfully connected to server {remote_server_id} at {ip}:{port}")
                 threading.Thread(target=handle_server_connection, args=(server_socket, remote_server_id)).start()
+                threading.Thread(target=send_heartbeat, args=(server_socket, remote_server_id)).start()
             else:
                 print(f"Unexpected response from server {remote_server_id}")
                 server_socket.close()
@@ -96,6 +104,7 @@ def connect_to_server(ip, port, remote_server_id):
             print(f"Error connecting to server {remote_server_id}: {e}")
 
 def handle_server_connection(server_socket, remote_server_id):
+    server_socket.settimeout(CONNECTION_TIMEOUT)
     while not shutdown_event.is_set():
         try:
             data = server_socket.recv(BUFFER_SIZE)
@@ -103,6 +112,8 @@ def handle_server_connection(server_socket, remote_server_id):
                 break
             message_type, message_data = parse_json_message(data.decode())
             handle_message(message_type, message_data, remote_server_id)
+        except socket.timeout:
+            continue
         except Exception as e:
             print(f"Error handling connection with server {remote_server_id}: {e}")
             break
@@ -110,6 +121,15 @@ def handle_server_connection(server_socket, remote_server_id):
     if remote_server_id in connected_servers:
         del connected_servers[remote_server_id]
     print(f"Connection with server {remote_server_id} closed")
+
+def send_heartbeat(server_socket, remote_server_id):
+    while not shutdown_event.is_set() and remote_server_id in connected_servers:
+        try:
+            server_socket.send(create_json_message("heartbeat"))
+            time.sleep(HEARTBEAT_INTERVAL)
+        except Exception as e:
+            print(f"Error sending heartbeat to {remote_server_id}: {e}")
+            break
 
 def handle_message(message_type, message_data, sender_id):
     global leader
@@ -121,6 +141,16 @@ def handle_message(message_type, message_data, sender_id):
         if leader != server_id:
             print(f"This server acknowledges {leader} as the leader")
         election_in_progress.clear()
+    elif message_type == "heartbeat":
+        pass
+    elif message_type == "ready_for_election":
+        all_servers_ready.set()
+    elif message_type == "leader_check":
+        if leader == server_id:
+            try:
+                connected_servers[sender_id]['socket'].send(create_json_message("leader_alive"))
+            except Exception as e:
+                print(f"Error responding to leader check from {sender_id}: {e}")
 
 def handle_election(election_data, sender_id):
     global leader
@@ -129,14 +159,17 @@ def handle_election(election_data, sender_id):
     if candidate_id > server_id:
         forward_election(election_data)
     elif candidate_id < server_id:
-        start_election()
+        if not election_in_progress.is_set():
+            start_election()
     else:
         leader = server_id
         announce_leader()
 
 def start_election():
+    global leader
     if not election_in_progress.is_set():
         election_in_progress.set()
+        leader = None
         print(f"Starting election with candidate ID: {server_id}")
         election_message = create_json_message("election", candidate_id=server_id)
         next_server = get_next_server_in_ring()
@@ -147,7 +180,6 @@ def start_election():
                 print(f"Error sending election message to {next_server}: {e}")
                 election_in_progress.clear()
         
-        # Set a timeout for the election process
         threading.Timer(ELECTION_TIMEOUT, end_election_timeout).start()
 
 def end_election_timeout():
@@ -175,6 +207,7 @@ def announce_leader():
             srv_info['socket'].send(leader_message)
         except Exception as e:
             print(f"Error announcing leader to {srv_id}: {e}")
+    election_in_progress.clear()
 
 def get_next_server_in_ring():
     if not connected_servers:
@@ -210,15 +243,95 @@ def handle_new_connection(client_socket, addr):
                 print(f"Server {remote_server_id} connected from {addr}")
                 client_socket.send(create_json_message("server_hello_ack"))
                 threading.Thread(target=handle_server_connection, args=(client_socket, remote_server_id)).start()
+                threading.Thread(target=send_heartbeat, args=(client_socket, remote_server_id)).start()
             else:
                 print(f"Duplicate connection attempt from {remote_server_id}. Ignoring.")
                 client_socket.close()
+        elif message_type == "CONNECT":
+            client_id = message_data['client_id']
+            connected_clients[client_id] = client_socket
+            print(f"Client {client_id} connected from {addr}")
+            client_socket.send(create_json_message("status", status="OK"))
+            threading.Thread(target=handle_client_messages, args=(client_socket, client_id)).start()
         else:
             print(f"Unexpected message type from {addr}: {message_type}")
             client_socket.close()
     except Exception as e:
         print(f"Error handling new connection from {addr}: {e}")
         client_socket.close()
+
+def listen_for_clients():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(('', CLIENT_LISTEN_PORT))
+        sock.listen()
+        print(f"Listening for client connections on port {CLIENT_LISTEN_PORT}")
+        while not shutdown_event.is_set():
+            try:
+                client_sock, addr = sock.accept()
+                threading.Thread(target=handle_client_connection, args=(client_sock, addr)).start()
+            except Exception as e:
+                print(f"Error accepting client connection: {e}")
+
+def handle_client_connection(client_sock, addr):
+    try:
+        data = client_sock.recv(BUFFER_SIZE)
+        message_type, message_data = parse_json_message(data.decode())
+        if message_type == "CONNECT":
+            client_id = message_data['client_id']
+            connected_clients[client_id] = client_sock
+            print(f"Client {client_id} connected from {addr}")
+            client_sock.send(create_json_message("status", status="OK"))
+            threading.Thread(target=handle_client_messages, args=(client_sock, client_id)).start()
+    except Exception as e:
+        print(f"Error handling client connection: {e}")
+        client_sock.close()
+
+def handle_client_messages(client_sock, client_id):
+    while not shutdown_event.is_set():
+        try:
+            data = client_sock.recv(BUFFER_SIZE)
+            if not data:
+                break
+            message_type, message_data = parse_json_message(data.decode())
+            if message_type == "CHAT":
+                broadcast_to_clients(client_id, message_data['message'])
+        except Exception as e:
+            print(f"Error handling message from client {client_id}: {e}")
+            break
+    
+    if client_id in connected_clients:
+        del connected_clients[client_id]
+    print(f"Client {client_id} disconnected")
+    client_sock.close()
+
+def broadcast_to_clients(sender_id, message):
+    broadcast_message = create_json_message("CHAT", sender_id=sender_id, content=message)
+    for client_id, client_sock in connected_clients.items():
+        if client_id != sender_id:
+            try:
+                client_sock.send(broadcast_message)
+            except Exception as e:
+                print(f"Error sending message to client {client_id}: {e}")
+
+def check_leader_status():
+    global leader
+    while not shutdown_event.is_set():
+        time.sleep(LEADER_CHECK_INTERVAL)
+        if leader and leader != server_id:
+            try:
+                leader_socket = connected_servers[leader]['socket']
+                leader_socket.send(create_json_message("leader_check"))
+                leader_socket.settimeout(5)
+                response = leader_socket.recv(BUFFER_SIZE)
+                message_type, _ = parse_json_message(response.decode())
+                if message_type != "leader_alive":
+                    raise Exception("Invalid leader response")
+            except Exception as e:
+                print(f"Leader {leader} seems to be down: {e}")
+                leader = None
+                start_election()
+        elif not leader:
+            start_election()
 
 def display_status():
     print(f"\nServer ID: {server_id}")
@@ -228,21 +341,39 @@ def display_status():
     for srv_id, srv_info in connected_servers.items():
         if srv_id != server_id:
             print(f"  {srv_id} at {srv_info['address']}:{srv_info['port']}")
+    print("Connected clients:")
+    for client_id in connected_clients:
+        print(f"  {client_id}")
 
 def main():
     global tcp_port, leader
 
-    tcp_port = find_available_port(TCP_BASE_PORT)
+    if len(sys.argv) > 1:
+        tcp_port = int(sys.argv[1])
+    else:
+        tcp_port = find_available_port(TCP_BASE_PORT)
+    
     print(f"Server starting - ID: {server_id}, TCP Port: {tcp_port}")
 
     threading.Thread(target=broadcast_presence, daemon=True).start()
     threading.Thread(target=listen_for_broadcasts, daemon=True).start()
     threading.Thread(target=accept_connections, daemon=True).start()
+    threading.Thread(target=check_leader_status, daemon=True).start()
+    threading.Thread(target=listen_for_clients, daemon=True).start()
 
-    ring_formed.wait()  # Wait for the ring to be formed
-    time.sleep(2)  # Give more time for final connections
+    ring_formed.wait()
+    time.sleep(2)
 
-    print("Ring formed. Starting leader election.")
+    print("Ring formed. Waiting for all servers to be ready.")
+    for srv_id in connected_servers:
+        try:
+            connected_servers[srv_id]['socket'].send(create_json_message("ready_for_election"))
+        except Exception as e:
+            print(f"Error sending ready message to {srv_id}: {e}")
+
+    all_servers_ready.wait(timeout=5)
+
+    print("Starting initial leader election.")
     if connected_servers:
         start_election()
     else:
@@ -263,6 +394,8 @@ def main():
 
     for srv_info in connected_servers.values():
         srv_info['socket'].close()
+    for client_sock in connected_clients.values():
+        client_sock.close()
 
 if __name__ == "__main__":
     main()

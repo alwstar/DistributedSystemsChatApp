@@ -8,6 +8,10 @@ import sys
 # Constants
 UDP_PORT = 42000
 TCP_BASE_PORT = 6000
+CLIENT_DISCOVERY_PORT = 5000  # New port for client discovery
+CLIENT_LISTEN_PORT = 5001
+CLIENT_SEND_PORT = 5002
+CLIENT_RECEIVE_PORT = 5003
 BUFFER_SIZE = 1024
 SEARCH_TIME = 10
 ELECTION_TIMEOUT = 15
@@ -19,6 +23,7 @@ LEADER_CHECK_INTERVAL = 10
 server_id = f"SERVER_{random.randint(1000, 9999)}"
 tcp_port = None
 connected_servers = {}
+connected_clients = {}
 leader = None
 is_active = True
 shutdown_event = threading.Event()
@@ -117,6 +122,37 @@ def handle_server_connection(server_socket, remote_server_id):
     if remote_server_id in connected_servers:
         del connected_servers[remote_server_id]
     print(f"Connection with server {remote_server_id} closed")
+
+def listen_for_client_discovery():
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
+        udp_socket.bind(('', CLIENT_DISCOVERY_PORT))
+        print(f"Listening for client discovery on UDP port {CLIENT_DISCOVERY_PORT}")
+        while not shutdown_event.is_set():
+            try:
+                data, addr = udp_socket.recvfrom(BUFFER_SIZE)
+                message = json.loads(data.decode())
+                if message.get("type") == "CLIENT_DISCOVERY":
+                    response = json.dumps({
+                        "type": "SERVER_RESPONSE",
+                        "server_id": server_id,
+                        "tcp_port": CLIENT_LISTEN_PORT
+                    }).encode()
+                    udp_socket.sendto(response, addr)
+                    print(f"Responded to client discovery from {addr}")
+            except Exception as e:
+                print(f"Error in client discovery: {e}")
+
+def listen_for_clients():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(('', CLIENT_LISTEN_PORT))
+        sock.listen()
+        print(f"Listening for client connections on port {CLIENT_LISTEN_PORT}")
+        while not shutdown_event.is_set():
+            try:
+                client_sock, addr = sock.accept()
+                threading.Thread(target=handle_client_connection, args=(client_sock, addr)).start()
+            except Exception as e:
+                print(f"Error accepting client connection: {e}")
 
 def send_heartbeat(server_socket, remote_server_id):
     while not shutdown_event.is_set() and remote_server_id in connected_servers:
@@ -243,12 +279,71 @@ def handle_new_connection(client_socket, addr):
             else:
                 print(f"Duplicate connection attempt from {remote_server_id}. Ignoring.")
                 client_socket.close()
+        elif message_type == "CONNECT":
+            client_id = message_data['client_id']
+            connected_clients[client_id] = client_socket
+            print(f"Client {client_id} connected from {addr}")
+            client_socket.send(create_json_message("status", status="OK"))
+            threading.Thread(target=handle_client_messages, args=(client_socket, client_id)).start()
         else:
             print(f"Unexpected message type from {addr}: {message_type}")
             client_socket.close()
     except Exception as e:
         print(f"Error handling new connection from {addr}: {e}")
         client_socket.close()
+
+def listen_for_clients():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(('', CLIENT_LISTEN_PORT))
+        sock.listen()
+        print(f"Listening for client connections on port {CLIENT_LISTEN_PORT}")
+        while not shutdown_event.is_set():
+            try:
+                client_sock, addr = sock.accept()
+                threading.Thread(target=handle_client_connection, args=(client_sock, addr)).start()
+            except Exception as e:
+                print(f"Error accepting client connection: {e}")
+
+def handle_client_connection(client_sock, addr):
+    try:
+        data = client_sock.recv(BUFFER_SIZE)
+        message_type, message_data = parse_json_message(data.decode())
+        if message_type == "CONNECT":
+            client_id = message_data['client_id']
+            connected_clients[client_id] = client_sock
+            print(f"Client {client_id} connected from {addr}")
+            client_sock.send(create_json_message("status", status="OK"))
+            threading.Thread(target=handle_client_messages, args=(client_sock, client_id)).start()
+    except Exception as e:
+        print(f"Error handling client connection: {e}")
+        client_sock.close()
+
+def handle_client_messages(client_sock, client_id):
+    while not shutdown_event.is_set():
+        try:
+            data = client_sock.recv(BUFFER_SIZE)
+            if not data:
+                break
+            message_type, message_data = parse_json_message(data.decode())
+            if message_type == "CHAT":
+                broadcast_to_clients(client_id, message_data['message'])
+        except Exception as e:
+            print(f"Error handling message from client {client_id}: {e}")
+            break
+    
+    if client_id in connected_clients:
+        del connected_clients[client_id]
+    print(f"Client {client_id} disconnected")
+    client_sock.close()
+
+def broadcast_to_clients(sender_id, message):
+    broadcast_message = create_json_message("CHAT", sender_id=sender_id, content=message)
+    for client_id, client_sock in connected_clients.items():
+        if client_id != sender_id:
+            try:
+                client_sock.send(broadcast_message)
+            except Exception as e:
+                print(f"Error sending message to client {client_id}: {e}")
 
 def check_leader_status():
     global leader
@@ -278,6 +373,9 @@ def display_status():
     for srv_id, srv_info in connected_servers.items():
         if srv_id != server_id:
             print(f"  {srv_id} at {srv_info['address']}:{srv_info['port']}")
+    print("Connected clients:")
+    for client_id in connected_clients:
+        print(f"  {client_id}")
 
 def main():
     global tcp_port, leader
@@ -293,6 +391,8 @@ def main():
     threading.Thread(target=listen_for_broadcasts, daemon=True).start()
     threading.Thread(target=accept_connections, daemon=True).start()
     threading.Thread(target=check_leader_status, daemon=True).start()
+    threading.Thread(target=listen_for_clients, daemon=True).start()
+    threading.Thread(target=listen_for_client_discovery, daemon=True).start()  # New thread for client discovery
 
     ring_formed.wait()
     time.sleep(2)
@@ -327,6 +427,8 @@ def main():
 
     for srv_info in connected_servers.values():
         srv_info['socket'].close()
+    for client_sock in connected_clients.values():
+        client_sock.close()
 
 if __name__ == "__main__":
     main()
