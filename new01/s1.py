@@ -9,11 +9,11 @@ import sys
 UDP_PORT = 42000
 TCP_BASE_PORT = 6000
 BUFFER_SIZE = 1024
-SEARCH_TIME = 10  # Time to search for other servers
-ELECTION_TIMEOUT = 15  # Timeout for election process
-CONNECTION_TIMEOUT = 10  # Timeout for initial connection
-HEARTBEAT_INTERVAL = 5  # Interval for sending heartbeats
-LEADER_CHECK_INTERVAL = 10  # Interval for checking leader status
+SEARCH_TIME = 10
+ELECTION_TIMEOUT = 15
+CONNECTION_TIMEOUT = 10
+HEARTBEAT_INTERVAL = 5
+LEADER_CHECK_INTERVAL = 10
 
 # Global variables
 server_id = f"SERVER_{random.randint(1000, 9999)}"
@@ -62,7 +62,7 @@ def listen_for_broadcasts():
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
         udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         udp_socket.bind(('', UDP_PORT))
-        udp_socket.settimeout(1)  # Set a timeout for the socket
+        udp_socket.settimeout(1)
         print(f"Listening for broadcasts on UDP port {UDP_PORT}")
         end_time = time.time() + SEARCH_TIME
         while time.time() < end_time and not shutdown_event.is_set():
@@ -138,7 +138,6 @@ def handle_message(message_type, message_data, sender_id):
             print(f"This server acknowledges {leader} as the leader")
         election_in_progress.clear()
     elif message_type == "heartbeat":
-        # Heartbeat received, connection is still alive
         pass
     elif message_type == "ready_for_election":
         all_servers_ready.set()
@@ -156,7 +155,8 @@ def handle_election(election_data, sender_id):
     if candidate_id > server_id:
         forward_election(election_data)
     elif candidate_id < server_id:
-        start_election()
+        if not election_in_progress.is_set():
+            start_election()
     else:
         leader = server_id
         announce_leader()
@@ -165,7 +165,7 @@ def start_election():
     global leader
     if not election_in_progress.is_set():
         election_in_progress.set()
-        leader = None  # Reset leader
+        leader = None
         print(f"Starting election with candidate ID: {server_id}")
         election_message = create_json_message("election", candidate_id=server_id)
         next_server = get_next_server_in_ring()
@@ -176,7 +176,6 @@ def start_election():
                 print(f"Error sending election message to {next_server}: {e}")
                 election_in_progress.clear()
         
-        # Set a timeout for the election process
         threading.Timer(ELECTION_TIMEOUT, end_election_timeout).start()
 
 def end_election_timeout():
@@ -204,6 +203,7 @@ def announce_leader():
             srv_info['socket'].send(leader_message)
         except Exception as e:
             print(f"Error announcing leader to {srv_id}: {e}")
+    election_in_progress.clear()
 
 def get_next_server_in_ring():
     if not connected_servers:
@@ -258,7 +258,6 @@ def check_leader_status():
             try:
                 leader_socket = connected_servers[leader]['socket']
                 leader_socket.send(create_json_message("leader_check"))
-                # Wait for response
                 leader_socket.settimeout(5)
                 response = leader_socket.recv(BUFFER_SIZE)
                 message_type, _ = parse_json_message(response.decode())
@@ -295,8 +294,8 @@ def main():
     threading.Thread(target=accept_connections, daemon=True).start()
     threading.Thread(target=check_leader_status, daemon=True).start()
 
-    ring_formed.wait()  # Wait for the ring to be formed
-    time.sleep(2)  # Give more time for final connections
+    ring_formed.wait()
+    time.sleep(2)
 
     print("Ring formed. Waiting for all servers to be ready.")
     for srv_id in connected_servers:
@@ -305,7 +304,7 @@ def main():
         except Exception as e:
             print(f"Error sending ready message to {srv_id}: {e}")
 
-    all_servers_ready.wait(timeout=5)  # Wait for all servers to be ready, with a timeout
+    all_servers_ready.wait(timeout=5)
 
     print("Starting initial leader election.")
     if connected_servers:
