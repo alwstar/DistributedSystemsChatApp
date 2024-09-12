@@ -121,7 +121,7 @@ class Client:
                 break
             self.send_message(user_input)
 
-if _name_ == "_main_":
+if __name__ == "_main_":
     server_ip = "255.255.255.255"  # Broadcast IP address for handshake
     client = Client(server_ip)
     client.run()
