@@ -231,6 +231,14 @@ def forward_election(election_data):
 def announce_leader():
     print(f"Announcing self as leader: {server_id}")
     leader_message = create_json_message("leader_announcement", leader_id=server_id)
+    
+    # Inform all connected clients about the new leader
+    for client_id, client_info in connected_clients.items():
+        try:
+            client_info['socket'].send(leader_message)
+        except Exception as e:
+            print(f"Error announcing leader to client {client_id}: {e}")
+
     for srv_id, srv_info in connected_servers.items():
         try:
             srv_info['socket'].send(leader_message)
@@ -309,7 +317,11 @@ def handle_client_connection(client_sock, addr):
             connected_clients[client_id] = {'socket': client_sock, 'address': addr[0], 'port': client_port}
             print(f"Client {client_id} connected from {addr}")
             client_sock.send(create_json_message("status", status="OK"))
+            # Start a thread to handle receiving messages from this client
             threading.Thread(target=handle_client_messages, args=(client_sock, client_id)).start()
+        else:
+            print(f"Unexpected message type from {addr}: {message_type}")
+            client_sock.close()
     except Exception as e:
         print(f"Error handling client connection: {e}")
         client_sock.close()
@@ -335,13 +347,15 @@ def handle_client_messages(client_sock, client_id):
 def broadcast_to_clients(sender_id, message):
     broadcast_message = create_json_message("CHAT", sender_id=sender_id, content=message)
     for client_id, client_info in connected_clients.items():
-        if client_id != sender_id:
+        if client_id != sender_id:  # Exclude sender from broadcast
             try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                    sock.connect((client_info['address'], client_info['port']))
-                    sock.send(broadcast_message)
+                # Send the message to the connected client using its existing socket
+                client_info['socket'].send(broadcast_message)
             except Exception as e:
                 print(f"Error sending message to client {client_id}: {e}")
+                # Handle case where client connection might be closed
+                client_info['socket'].close()
+                del connected_clients[client_id]  # Remove disconnected client
 
 def check_leader_status():
     global leader
