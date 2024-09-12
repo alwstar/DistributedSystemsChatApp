@@ -1,174 +1,36 @@
 import socket
 import threading
 import time
-import sys
 import json
 import random
+import sys
 
 # Constants
 UDP_PORT = 42000
+TCP_BASE_PORT = 6001
 BUFFER_SIZE = 1024
-BASE_TCP_PORT = 6000
+SEARCH_TIME = 10  # Time to search for other servers
+ELECTION_TIMEOUT = 5  # Timeout for election process
+CONNECTION_TIMEOUT = 5  # Timeout for initial connection
 
 # Global variables
-connectedServers = {}  # Dictionary to store server information (socket, address)
-connectedUsers = {}    # Dictionary to store user information (socket, address)
-leader = None          # Current leader
-isActive = True        # Server active state
-discussionGroups = {}  # Dictionary to store discussion groups and their members
+server_id = f"SERVER_{random.randint(1000, 9999)}"
+tcp_port = None
+connected_servers = {}
+leader = None
+is_active = True
+shutdown_event = threading.Event()
+ring_formed = threading.Event()
+election_in_progress = threading.Event()
 
-# Shutdown event
-shutdownEvent = threading.Event()
+def create_json_message(message_type, **kwargs):
+    return json.dumps({"type": message_type, **kwargs}).encode()
 
-def generateServerId():
-    return f"SERVER_{random.randint(1000, 9999)}"
+def parse_json_message(json_string):
+    data = json.loads(json_string)
+    return data.pop("type"), data
 
-SERVER_ID = generateServerId()
-TCP_PORT = None  # Will be set in main()
-
-def createJsonMessage(messageType, **kwargs):
-    message = {"type": messageType, **kwargs}
-    return json.dumps(message).encode()
-
-def parseJsonMessage(jsonString):
-    data = json.loads(jsonString)
-    messageType = data.pop("type")
-    return messageType, data
-
-def broadcastServerPresence():
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udpSocket:
-        udpSocket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        while isActive:
-            message = createJsonMessage("ServerAvailable", id=SERVER_ID, port=TCP_PORT)
-            udpSocket.sendto(message, ('<broadcast>', UDP_PORT))
-            time.sleep(10)
-
-def initiateLeaderElection():
-    global leader
-    if connectedServers:
-        maxId = max(connectedServers, key=lambda id: connectedServers[id]['port'])
-        leader = maxId
-        announceLeader(leader)
-    else:
-        leader = SERVER_ID
-        print(f"No other servers connected. This server ({SERVER_ID}) is the leader.")
-
-def serverConnectionManager(serverSocket, serverId, addr):
-    global connectedServers, leader
-    while not shutdownEvent.is_set():
-        try:
-            message = serverSocket.recv(BUFFER_SIZE)
-            if not message:
-                break
-
-            messageType, data = parseJsonMessage(message.decode())
-
-            if messageType == "election":
-                processElectionMessage(serverSocket, serverId, data)
-            elif messageType == "chatroom":
-                processChatroomMessage(serverSocket, serverId, data)
-            else:
-                print(f"Unknown message type received from server {serverId}: {messageType}")
-
-        except Exception as e:
-            print(f"Error handling server {serverId}: {e}")
-            break
-
-    serverSocket.close()
-    print(f"Connection with server {serverId} closed")
-    if serverId in connectedServers:
-        del connectedServers[serverId]
-        if serverId == leader:
-            print("Leader has disconnected. Initiating new leader election.")
-            initiateLeaderElection()
-
-def processElectionMessage(serverSocket, serverId, data):
-    global leader
-    senderId = data['id']
-    isLeader = data['isLeader']
-
-    if isLeader:
-        leader = senderId
-        announceLeader(leader)
-    else:
-        nextServer = getNextServer(serverId)
-        if nextServer:
-            connectedServers[nextServer]['socket'].send(createJsonMessage("election", id=senderId, isLeader=False))
-
-def getNextServer(currentServerId):
-    serverList = list(connectedServers.keys())
-    if currentServerId in serverList:
-        currentIndex = serverList.index(currentServerId)
-        nextIndex = (currentIndex + 1) % len(serverList)
-        return serverList[nextIndex]
-    return None
-
-def announceLeader(leaderId):
-    leaderAnnouncement = createJsonMessage("leader_announcement", leader_id=leaderId)
-    for serverInfo in connectedServers.values():
-        serverInfo['socket'].send(leaderAnnouncement)
-    print(f"Leader is server {leaderId}")
-
-def processChatroomMessage(serverSocket, serverId, data):
-    action = data['action']
-    chatroom = data['chatroom']
-
-    if action == "join":
-        if chatroom not in discussionGroups:
-            discussionGroups[chatroom] = set()
-        discussionGroups[chatroom].add(serverId)
-        announceServerJoined(chatroom, serverId)
-    elif action == "leave":
-        if chatroom in discussionGroups and serverId in discussionGroups[chatroom]:
-            discussionGroups[chatroom].remove(serverId)
-            announceServerLeft(chatroom, serverId)
-    elif action == "message":
-        if chatroom in discussionGroups and serverId in discussionGroups[chatroom]:
-            broadcastChatroomMessage(chatroom, serverId, data['content'])
-
-def announceServerJoined(chatroom, serverId):
-    announcement = createJsonMessage("chatroom_update", action="joined", chatroom=chatroom, server_id=serverId)
-    for sid in discussionGroups[chatroom]:
-        if sid in connectedServers:
-            connectedServers[sid]['socket'].send(announcement)
-
-def announceServerLeft(chatroom, serverId):
-    announcement = createJsonMessage("chatroom_update", action="left", chatroom=chatroom, server_id=serverId)
-    for sid in discussionGroups[chatroom]:
-        if sid in connectedServers:
-            connectedServers[sid]['socket'].send(announcement)
-
-def broadcastChatroomMessage(chatroom, senderId, content):
-    message = createJsonMessage("chatroom_message", chatroom=chatroom, sender_id=senderId, content=content)
-    for sid in discussionGroups[chatroom]:
-        if sid in connectedServers:
-            connectedServers[sid]['socket'].send(message)
-
-def terminateServer(tcpSocket):
-    global isActive
-    isActive = False
-    shutdownEvent.set()
-
-    for serverInfo in connectedServers.values():
-        try:
-            serverInfo['socket'].close()
-        except Exception as e:
-            print(f"Error closing server connection: {e}")
-
-    connectedServers.clear()
-    discussionGroups.clear()
-    tcpSocket.close()
-    print("Server has been terminated.")
-
-def displayConnectedServers():
-    if connectedServers:
-        print("Connected servers:")
-        for serverId, info in connectedServers.items():
-            print(f"Server {serverId} at {info['address']}:{info['port']}")
-    else:
-        print("No other servers connected.")
-
-def findAvailablePort(start_port):
+def find_available_port(start_port):
     port = start_port
     while True:
         try:
@@ -178,61 +40,229 @@ def findAvailablePort(start_port):
         except OSError:
             port += 1
 
-def main():
-    global isActive, leader, TCP_PORT
-
-    TCP_PORT = findAvailablePort(BASE_TCP_PORT)
-    print(f"Server ID: {SERVER_ID}")
-    print(f"TCP Port: {TCP_PORT}")
-
-    broadcastThread = threading.Thread(target=broadcastServerPresence)
-    broadcastThread.start()
-
-    tcpSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    tcpSocket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    tcpSocket.bind(('', TCP_PORT))
-    tcpSocket.listen()
-    print(f"TCP server listening on port {TCP_PORT}")
-
-    def manageConnections(tcpSocket):
-        global connectedServers, isActive
-
-        while isActive:
+def broadcast_presence():
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
+        udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        end_time = time.time() + SEARCH_TIME
+        while time.time() < end_time and not shutdown_event.is_set():
+            message = create_json_message("server_available", id=server_id, port=tcp_port)
             try:
-                serverSocket, addr = tcpSocket.accept()
-                serverId = f"SERVER_{addr[1]}"  # Using port as a unique identifier
-                connectedServers[serverId] = {'socket': serverSocket, 'address': addr[0], 'port': addr[1]}
-                print(f"Connected to server {serverId} at {addr}")
-                threading.Thread(target=serverConnectionManager, args=(serverSocket, serverId, addr)).start()
-
-                if leader is None:
-                    initiateLeaderElection()
-
+                udp_socket.sendto(message, ('<broadcast>', UDP_PORT))
+                print(f"Broadcast sent: Server {server_id} available on port {tcp_port}")
             except Exception as e:
-                print(f"Error in connection management: {e}")
+                print(f"Error sending broadcast: {e}")
+            time.sleep(1)
+    print("Server search completed.")
+    ring_formed.set()
 
-        tcpSocket.close()
+def listen_for_broadcasts():
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
+        udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        udp_socket.bind(('', UDP_PORT))
+        udp_socket.settimeout(1)  # Set a timeout for the socket
+        print(f"Listening for broadcasts on UDP port {UDP_PORT}")
+        end_time = time.time() + SEARCH_TIME
+        while time.time() < end_time and not shutdown_event.is_set():
+            try:
+                data, addr = udp_socket.recvfrom(BUFFER_SIZE)
+                message_type, message_data = parse_json_message(data.decode())
+                if message_type == "server_available" and message_data['id'] != server_id:
+                    if message_data['id'] not in connected_servers:
+                        print(f"Discovered server: {message_data['id']} on {addr[0]}:{message_data['port']}")
+                        threading.Thread(target=connect_to_server, args=(addr[0], int(message_data['port']), message_data['id'])).start()
+            except socket.timeout:
+                continue
+            except Exception as e:
+                print(f"Error receiving broadcast: {e}")
+    print("Broadcast listening completed.")
 
-    connectionThread = threading.Thread(target=manageConnections, args=(tcpSocket,))
-    connectionThread.start()
-
-    while isActive:
-        cmd = input("\nSelect an option\n1: Display current leader\n2: Show connected servers\n3: Terminate server\n")
-        if cmd == '3':
-            terminateServer(tcpSocket)
-            break
-        elif cmd == '2':
-            displayConnectedServers()
-        elif cmd == '1':
-            if leader:
-                print(f"Current leader is: {leader}")
+def connect_to_server(ip, port, remote_server_id):
+    if remote_server_id not in connected_servers and remote_server_id != server_id:
+        try:
+            server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server_socket.settimeout(CONNECTION_TIMEOUT)
+            server_socket.connect((ip, port))
+            server_socket.send(create_json_message("server_hello", id=server_id))
+            response = server_socket.recv(BUFFER_SIZE)
+            message_type, _ = parse_json_message(response.decode())
+            if message_type == "server_hello_ack":
+                connected_servers[remote_server_id] = {'socket': server_socket, 'address': ip, 'port': port}
+                print(f"Successfully connected to server {remote_server_id} at {ip}:{port}")
+                threading.Thread(target=handle_server_connection, args=(server_socket, remote_server_id)).start()
             else:
-                print("No leader has been elected yet.")
-        else:
-            print("Invalid command.")
+                print(f"Unexpected response from server {remote_server_id}")
+                server_socket.close()
+        except Exception as e:
+            print(f"Error connecting to server {remote_server_id}: {e}")
 
-    connectionThread.join()
-    broadcastThread.join()
+def handle_server_connection(server_socket, remote_server_id):
+    while not shutdown_event.is_set():
+        try:
+            data = server_socket.recv(BUFFER_SIZE)
+            if not data:
+                break
+            message_type, message_data = parse_json_message(data.decode())
+            handle_message(message_type, message_data, remote_server_id)
+        except Exception as e:
+            print(f"Error handling connection with server {remote_server_id}: {e}")
+            break
+    
+    if remote_server_id in connected_servers:
+        del connected_servers[remote_server_id]
+    print(f"Connection with server {remote_server_id} closed")
+
+def handle_message(message_type, message_data, sender_id):
+    global leader
+    if message_type == "election":
+        handle_election(message_data, sender_id)
+    elif message_type == "leader_announcement":
+        leader = message_data['leader_id']
+        print(f"Leader announced: {leader}")
+        if leader != server_id:
+            print(f"This server acknowledges {leader} as the leader")
+        election_in_progress.clear()
+
+def handle_election(election_data, sender_id):
+    global leader
+    candidate_id = election_data['candidate_id']
+    print(f"Received election message from {sender_id} with candidate {candidate_id}")
+    if candidate_id > server_id:
+        forward_election(election_data)
+    elif candidate_id < server_id:
+        start_election()
+    else:
+        leader = server_id
+        announce_leader()
+
+def start_election():
+    if not election_in_progress.is_set():
+        election_in_progress.set()
+        print(f"Starting election with candidate ID: {server_id}")
+        election_message = create_json_message("election", candidate_id=server_id)
+        next_server = get_next_server_in_ring()
+        if next_server:
+            try:
+                connected_servers[next_server]['socket'].send(election_message)
+            except Exception as e:
+                print(f"Error sending election message to {next_server}: {e}")
+                election_in_progress.clear()
+        
+        # Set a timeout for the election process
+        threading.Timer(ELECTION_TIMEOUT, end_election_timeout).start()
+
+def end_election_timeout():
+    global leader
+    if election_in_progress.is_set():
+        print("Election timeout reached. Assuming leadership.")
+        leader = server_id
+        announce_leader()
+        election_in_progress.clear()
+
+def forward_election(election_data):
+    election_message = create_json_message("election", **election_data)
+    next_server = get_next_server_in_ring()
+    if next_server:
+        try:
+            connected_servers[next_server]['socket'].send(election_message)
+        except Exception as e:
+            print(f"Error forwarding election message to {next_server}: {e}")
+
+def announce_leader():
+    print(f"Announcing self as leader: {server_id}")
+    leader_message = create_json_message("leader_announcement", leader_id=server_id)
+    for srv_id, srv_info in connected_servers.items():
+        try:
+            srv_info['socket'].send(leader_message)
+        except Exception as e:
+            print(f"Error announcing leader to {srv_id}: {e}")
+
+def get_next_server_in_ring():
+    if not connected_servers:
+        return None
+    server_ids = sorted(list(connected_servers.keys()) + [server_id])
+    current_index = server_ids.index(server_id)
+    next_index = (current_index + 1) % len(server_ids)
+    next_server_id = server_ids[next_index]
+    return next_server_id if next_server_id != server_id else None
+
+def accept_connections():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp_socket:
+        tcp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        tcp_socket.bind(('', tcp_port))
+        tcp_socket.listen()
+        print(f"Listening for TCP connections on port {tcp_port}")
+        while not shutdown_event.is_set():
+            try:
+                client_socket, addr = tcp_socket.accept()
+                print(f"Accepted connection from {addr}")
+                threading.Thread(target=handle_new_connection, args=(client_socket, addr)).start()
+            except Exception as e:
+                print(f"Error accepting connection: {e}")
+
+def handle_new_connection(client_socket, addr):
+    try:
+        data = client_socket.recv(BUFFER_SIZE)
+        message_type, message_data = parse_json_message(data.decode())
+        if message_type == "server_hello":
+            remote_server_id = message_data['id']
+            if remote_server_id not in connected_servers and remote_server_id != server_id:
+                connected_servers[remote_server_id] = {'socket': client_socket, 'address': addr[0], 'port': addr[1]}
+                print(f"Server {remote_server_id} connected from {addr}")
+                client_socket.send(create_json_message("server_hello_ack"))
+                threading.Thread(target=handle_server_connection, args=(client_socket, remote_server_id)).start()
+            else:
+                print(f"Duplicate connection attempt from {remote_server_id}. Ignoring.")
+                client_socket.close()
+        else:
+            print(f"Unexpected message type from {addr}: {message_type}")
+            client_socket.close()
+    except Exception as e:
+        print(f"Error handling new connection from {addr}: {e}")
+        client_socket.close()
+
+def display_status():
+    print(f"\nServer ID: {server_id}")
+    print(f"TCP Port: {tcp_port}")
+    print(f"Current leader: {leader if leader else 'No leader elected'}")
+    print("Connected servers:")
+    for srv_id, srv_info in connected_servers.items():
+        if srv_id != server_id:
+            print(f"  {srv_id} at {srv_info['address']}:{srv_info['port']}")
+
+def main():
+    global tcp_port, leader
+
+    tcp_port = find_available_port(TCP_BASE_PORT)
+    print(f"Server starting - ID: {server_id}, TCP Port: {tcp_port}")
+
+    threading.Thread(target=broadcast_presence, daemon=True).start()
+    threading.Thread(target=listen_for_broadcasts, daemon=True).start()
+    threading.Thread(target=accept_connections, daemon=True).start()
+
+    ring_formed.wait()  # Wait for the ring to be formed
+    time.sleep(2)  # Give more time for final connections
+
+    print("Ring formed. Starting leader election.")
+    if connected_servers:
+        start_election()
+    else:
+        print("No other servers found. This server is the leader.")
+        leader = server_id
+        announce_leader()
+
+    while not shutdown_event.is_set():
+        cmd = input("\nEnter command (status/quit): ").lower()
+        if cmd == 'status':
+            display_status()
+        elif cmd == 'quit':
+            print("Shutting down server...")
+            shutdown_event.set()
+            break
+        else:
+            print("Unknown command. Available commands: status, quit")
+
+    for srv_info in connected_servers.values():
+        srv_info['socket'].close()
 
 if __name__ == "__main__":
     main()
