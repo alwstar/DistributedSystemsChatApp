@@ -89,23 +89,31 @@ def send_message(message):
             sock.connect((server_ip, server_port))
             data = create_json_message("CHAT", client_id=client_id, message=message)
             sock.send(data)
+            print(f"Message sent: {message}")  # Debug output
     except Exception as e:
         print(f"Error sending message: {e}")
         connected_event.clear()
 
 def receive_messages():
+    print(f"Listening for messages on port {client_port}")  # Debug output
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(('', client_port))
         sock.listen(1)
-        print(f"Listening for messages on port {client_port}")
+        sock.settimeout(1)  # Set a timeout to allow checking the shutdown event
         while not shutdown_event.is_set():
             try:
                 conn, addr = sock.accept()
                 with conn:
                     data = conn.recv(BUFFER_SIZE)
                     if data:
-                        message = json.loads(data.decode())
-                        print(f"{message['sender_id']}: {message['content']}")
+                        message_type, message_data = parse_json_message(data.decode())
+                        print(f"Received message type: {message_type}")  # Debug output
+                        if message_type == "CHAT":
+                            print(f"Received chat message from {message_data['sender_id']}: {message_data['content']}")
+                        else:
+                            print(f"Received unknown message type: {message_type}, data: {message_data}")
+            except socket.timeout:
+                continue
             except Exception as e:
                 print(f"Error receiving message: {e}")
 
