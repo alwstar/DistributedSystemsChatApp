@@ -158,32 +158,36 @@ def handle_election(election_data, sender_id):
     global leader
     candidate_id = election_data['candidate_id']
     print(f"Received election message from {sender_id} with candidate {candidate_id}")
+    
+    # If the received candidate ID is higher, forward the election message
     if candidate_id > server_id:
         forward_election(election_data)
+    
+    # If the received candidate ID is lower, send this server's ID in a new election message
     elif candidate_id < server_id:
-        if not election_in_progress.is_set():
-            start_election()
+        election_message = create_json_message("election", candidate_id=server_id)
+        forward_election({'candidate_id': server_id})
+    
+    # If the received candidate ID is equal to this server's ID, it means this server is the leader
     else:
         leader = server_id
         announce_leader()
-        election_complete.set()
 
 def start_election():
     global leader
+    # Start an election if not already in progress
     if not election_in_progress.is_set():
         election_in_progress.set()
-        election_complete.clear()  # Zurücksetzen des election_complete Events
         leader = None
         print(f"Starting election with candidate ID: {server_id}")
-        election_message = create_json_message("election", candidate_id=server_id)
-        next_server = get_next_server_in_ring()
-        if next_server:
-            try:
-                connected_servers[next_server]['socket'].send(election_message)
-            except Exception as e:
-                print(f"Error sending election message to {next_server}: {e}")
-                election_in_progress.clear()
         
+        # Create the election message with this server's ID as the candidate
+        election_message = create_json_message("election", candidate_id=server_id)
+        
+        # Send election message to the next server in the ring
+        forward_election({'candidate_id': server_id})
+        
+        # Set up a timer for election timeout
         threading.Timer(ELECTION_TIMEOUT, end_election_timeout).start()
 
 def end_election_timeout():
@@ -196,13 +200,18 @@ def end_election_timeout():
         election_complete.set()
 
 def forward_election(election_data):
+    """Forwards the election message to the next server in the ring."""
     election_message = create_json_message("election", **election_data)
     next_server = get_next_server_in_ring()
+    
     if next_server:
         try:
             connected_servers[next_server]['socket'].send(election_message)
+            print(f"Forwarded election message to {next_server}")
         except Exception as e:
             print(f"Error forwarding election message to {next_server}: {e}")
+    else:
+        print("No next server in ring to forward the election message to.")
 
 def announce_leader():
     global connected_clients
