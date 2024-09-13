@@ -30,6 +30,7 @@ shutdown_event = threading.Event()
 ring_formed = threading.Event()
 election_in_progress = threading.Event()
 all_servers_ready = threading.Event()
+client_addresses = {}
 
 def create_json_message(message_type, **kwargs):
     return json.dumps({"type": message_type, **kwargs}).encode()
@@ -213,15 +214,41 @@ def announce_leader():
     election_in_progress.clear()
     
     # Notify all connected clients about the new leader
+    notify_clients_new_leader()
+    
+    # Take over existing client connections
+    take_over_client_connections()
+
+def take_over_client_connections():
+    global connected_clients, client_addresses
+    for client_id, addr in list(client_addresses.items()):
+        if client_id not in connected_clients:
+            try:
+                client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                client_socket.connect((addr[0], CLIENT_LISTEN_PORT))
+                client_socket.send(create_json_message("RECONNECT", leader_id=server_id))
+                response = client_socket.recv(BUFFER_SIZE)
+                message_type, _ = parse_json_message(response.decode())
+                if message_type == "RECONNECT_ACK":
+                    connected_clients[client_id] = client_socket
+                    print(f"Reconnected to client {client_id}")
+                    threading.Thread(target=handle_client_message, args=(client_socket, client_id)).start()
+                else:
+                    print(f"Failed to reconnect to client {client_id}")
+            except Exception as e:
+                print(f"Error reconnecting to client {client_id}: {e}")
+                del client_addresses[client_id]
 
 def notify_clients_new_leader():
     leader_info = create_json_message("new_leader", leader_id=server_id)
     for client_id, client_sock in list(connected_clients.items()):
         try:
             client_sock.send(leader_info)
+            print(f"Notified client {client_id} about new leader")
         except Exception as e:
             print(f"Error notifying client {client_id} about new leader: {e}")
             del connected_clients[client_id]
+            del client_addresses[client_id]
 
 def get_next_server_in_ring():
     if not connected_servers:
@@ -246,6 +273,7 @@ def accept_connections():
             except Exception as e:
                 print(f"Error accepting connection: {e}")
 
+
 def handle_new_connection(client_socket, addr):
     try:
         data = client_socket.recv(BUFFER_SIZE)
@@ -264,6 +292,7 @@ def handle_new_connection(client_socket, addr):
         elif message_type == "CONNECT":
             client_id = message_data['client_id']
             connected_clients[client_id] = client_socket
+            client_addresses[client_id] = addr  # Store client address
             print(f"Client {client_id} connected from {addr}")
             client_socket.send(create_json_message("status", status="OK"))
             threading.Thread(target=handle_client_message, args=(client_socket, client_id)).start()
@@ -307,20 +336,25 @@ def listen_for_clients():
             except Exception as e:
                 print(f"Error accepting client connection: {e}")
 
-def handle_client_message(message, addr, client_sock):
-    message_type = message.get("type")
-    if message_type == "CONNECT":
-        client_id = message['client_id']
-        connected_clients[client_id] = client_sock
-        print(f"Client {client_id} connected from {addr}")
-        return json.dumps({"type": "CONNECT_RESPONSE", "status": "OK", "leader_id": server_id}).encode()
-    elif message_type == "CHAT":
-        client_id = message['client_id']
-        chat_message = message['message']
-        print(f"Received message from client {client_id}: {chat_message}")
-        broadcast_message(client_id, chat_message)
-        return json.dumps({"type": "CHAT_RESPONSE", "status": "Message received and broadcasted"}).encode()
-    return None
+def handle_client_message(client_socket, client_id):
+    try:
+        while not shutdown_event.is_set():
+            data = client_socket.recv(BUFFER_SIZE)
+            if not data:
+                break
+            message = json.loads(data.decode())
+            if message['type'] == "CHAT":
+                print(f"Received message from client {client_id}: {message['message']}")
+                broadcast_message(client_id, message['message'])
+    except Exception as e:
+        print(f"Error handling client message from {client_id}: {e}")
+    finally:
+        if client_id in connected_clients:
+            del connected_clients[client_id]
+        if client_id in client_addresses:
+            del client_addresses[client_id]
+        client_socket.close()
+        print(f"Client {client_id} disconnected")
 
 def broadcast_message(sender_id, message):
     broadcast_data = json.dumps({
@@ -337,6 +371,7 @@ def broadcast_message(sender_id, message):
             except Exception as e:
                 print(f"Error broadcasting message to client {client_id}: {e}")
                 del connected_clients[client_id]
+                del client_addresses[client_id]
                 print(f"Removed client {client_id} due to connection error")
 
 def handle_client_connection(client_sock, addr):
