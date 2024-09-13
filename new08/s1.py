@@ -30,6 +30,7 @@ shutdown_event = threading.Event()
 ring_formed = threading.Event()
 election_in_progress = threading.Event()
 all_servers_ready = threading.Event()
+election_complete = threading.Event()
 
 def create_json_message(message_type, **kwargs):
     return json.dumps({"type": message_type, **kwargs}).encode()
@@ -165,11 +166,13 @@ def handle_election(election_data, sender_id):
     else:
         leader = server_id
         announce_leader()
+        election_complete.set()
 
 def start_election():
     global leader
     if not election_in_progress.is_set():
         election_in_progress.set()
+        election_complete.clear()  # Zurücksetzen des election_complete Events
         leader = None
         print(f"Starting election with candidate ID: {server_id}")
         election_message = create_json_message("election", candidate_id=server_id)
@@ -190,6 +193,7 @@ def end_election_timeout():
         leader = server_id
         announce_leader()
         election_in_progress.clear()
+        election_complete.set()
 
 def forward_election(election_data):
     election_message = create_json_message("election", **election_data)
@@ -284,7 +288,7 @@ def listen_for_client_discovery():
                 data, addr = udp_socket.recvfrom(BUFFER_SIZE)
                 message = json.loads(data.decode())
                 if message.get("type") == "LEADER_REQUEST":
-                    if leader == server_id:
+                    if leader == server_id and election_complete.is_set():
                         response = json.dumps({
                             "type": "LEADER_RESPONSE",
                             "server_id": server_id,
@@ -293,7 +297,7 @@ def listen_for_client_discovery():
                         udp_socket.sendto(response, addr)
                         print(f"Responded to client discovery from {addr}")
                     else:
-                        print(f"Received client discovery from {addr}, but not the leader")
+                        print(f"Received client discovery from {addr}, but not the leader or election not complete")
             except Exception as e:
                 print(f"Error in client discovery: {e}")
 
@@ -400,8 +404,10 @@ def check_leader_status():
             except Exception as e:
                 print(f"Leader {leader} seems to be down: {e}")
                 leader = None
+                election_complete.clear()
                 start_election()
         elif not leader:
+            election_complete.clear()
             start_election()
 
 def display_status():
