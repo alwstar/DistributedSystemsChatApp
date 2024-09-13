@@ -24,7 +24,9 @@ def locate_leader():
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
         udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         udp_socket.settimeout(1)
-        while not shutdown_event.is_set():
+        attempt = 0
+        max_attempts = 5
+        while attempt < max_attempts and not shutdown_event.is_set():
             try:
                 message = json.dumps({"type": "LEADER_REQUEST", "client_id": client_id}).encode()
                 udp_socket.sendto(message, ('<broadcast>', LEADER_LISTEN_PORT))
@@ -35,8 +37,10 @@ def locate_leader():
                     print(f"Leader found at {leader_ip}")
                     return True
             except socket.timeout:
-                print("Leader not found. Retrying...")
+                print(f"Leader not found. Attempt {attempt + 1}/{max_attempts}")
+                attempt += 1
             time.sleep(RECONNECT_INTERVAL)
+    leader_ip = None
     return False
 
 def connect_to_leader():
@@ -128,35 +132,38 @@ def listen_for_messages():
             print(f"Listening for messages on port {CLIENT_LISTEN_PORT}")
             while not shutdown_event.is_set():
                 conn, addr = sock.accept()
-                threading.Thread(target=receive_message, args=(conn,), daemon=True).start()
+                threading.Thread(target=receive_messages, args=(conn,), daemon=True).start()
     except Exception as e:
         print(f"Error in listen_for_messages: {e}")
 
 def reconnect():
-    global leader_socket
+    global leader_ip, leader_socket
     while not shutdown_event.is_set():
         print("Attempting to reconnect...")
-        if locate_leader() and connect_to_leader():
-            break
+        if locate_leader():
+            if connect_to_leader():
+                print("Reconnected to new leader.")
+                return True
+        print("Leader not found or connection failed. Retrying...")
         time.sleep(RECONNECT_INTERVAL)
+    return False
 
 def main():
-    print(f"Client startet mit ID: {client_id}")
+    print(f"Client starting with ID: {client_id}")
     
     if not locate_leader():
-        print("Kein Leader gefunden. Beende.")
+        print("No leader found. Exiting.")
         return
 
     if not connect_to_leader():
-        print("Verbindung zum Leader fehlgeschlagen. Beende.")
+        print("Failed to connect to leader. Exiting.")
         return
 
-    # Starte den Thread zum Empfangen von Nachrichten vom Server
     server_listen_thread = threading.Thread(target=listen_to_server, daemon=True)
     server_listen_thread.start()
 
     while not shutdown_event.is_set():
-        message = input("Geben Sie eine Nachricht ein (oder 'quit' zum Beenden): ")
+        message = input("Enter message (or 'quit' to exit): ")
         if message.lower() == 'quit':
             shutdown_event.set()
             break
@@ -164,7 +171,7 @@ def main():
 
     if leader_socket:
         leader_socket.close()
-    print("Client getrennt.")
+    print("Client disconnected.")
 
 if __name__ == "__main__":
     main()
