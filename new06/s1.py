@@ -20,7 +20,7 @@ HEARTBEAT_INTERVAL = 5
 LEADER_CHECK_INTERVAL = 10
 
 # Global variables
-server_id = f"SERVER_{random.randint(1000, 9999)}"
+server_id = f"SERVER_{random.randint(1000, 9999)}_{int(time.time())}"
 tcp_port = None
 connected_servers = {}
 connected_clients = {}

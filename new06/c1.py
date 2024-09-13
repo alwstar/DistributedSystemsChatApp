@@ -13,7 +13,7 @@ BUFFER_SIZE = 1024
 RECONNECT_INTERVAL = 5
 
 # Global variables
-client_id = f"CLIENT_{random.randint(1000, 9999)}"
+client_id = f"CLIENT_{random.randint(1000, 9999)}_{int(time.time())}"
 leader_ip = None
 leader_socket = None
 shutdown_event = threading.Event()
