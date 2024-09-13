@@ -122,6 +122,8 @@ def handle_server_connection(server_socket, remote_server_id):
     if remote_server_id in connected_servers:
         del connected_servers[remote_server_id]
     print(f"Connection with server {remote_server_id} closed")
+    if leader == remote_server_id:
+        start_election()
 
 def send_heartbeat(server_socket, remote_server_id):
     while not shutdown_event.is_set() and remote_server_id in connected_servers:
