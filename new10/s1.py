@@ -288,11 +288,13 @@ def listen_for_client_discovery():
                 data, addr = udp_socket.recvfrom(BUFFER_SIZE)
                 message = json.loads(data.decode())
                 if message.get("type") == "LEADER_REQUEST":
+                    # Only respond if election is complete
                     if leader == server_id and election_complete.is_set():
                         response = json.dumps({
                             "type": "LEADER_RESPONSE",
                             "server_id": server_id,
-                            "tcp_port": CLIENT_LISTEN_PORT
+                            "tcp_port": CLIENT_LISTEN_PORT,
+                            "election_complete": True
                         }).encode()
                         udp_socket.sendto(response, addr)
                         print(f"Responded to client discovery from {addr}")
@@ -300,6 +302,7 @@ def listen_for_client_discovery():
                         print(f"Received client discovery from {addr}, but not the leader or election not complete")
             except Exception as e:
                 print(f"Error in client discovery: {e}")
+
 
 
 def listen_for_clients():

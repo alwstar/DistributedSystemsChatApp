@@ -32,16 +32,20 @@ def locate_leader():
                 udp_socket.sendto(message, ('<broadcast>', LEADER_LISTEN_PORT))
                 response, server_addr = udp_socket.recvfrom(BUFFER_SIZE)
                 leader_data = json.loads(response.decode())
-                if leader_data.get("type") == "LEADER_RESPONSE":
+                # Check if election is complete
+                if leader_data.get("type") == "LEADER_RESPONSE" and leader_data.get("election_complete", False):
                     leader_ip = server_addr[0]
                     print(f"Leader found at {leader_ip}")
                     return True
+                else:
+                    print("Leader election not complete yet.")
             except socket.timeout:
                 print(f"Leader not found. Attempt {attempt + 1}/{max_attempts}")
                 attempt += 1
             time.sleep(RECONNECT_INTERVAL)
     leader_ip = None
     return False
+
 
 def connect_to_leader():
     global leader_socket
