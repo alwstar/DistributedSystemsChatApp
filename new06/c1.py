@@ -158,3 +158,6 @@ def main():
     if leader_socket:
         leader_socket.close()
     print("Client getrennt.")
+
+if __name__ == "__main__":
+    main()
