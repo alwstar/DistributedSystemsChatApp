@@ -90,14 +90,13 @@ def listen_to_server():
             data = recv_with_length_prefix(leader_socket)
             if not data:
                 break
-            print(f"Empfangene Rohdaten: {data}")
             message = json.loads(data.decode())
-            print(f"Empfangene Nachricht: {message}")
             if message['type'] == 'BROADCAST':
-                print(f"\nEmpfangene Nachricht von {message['sender_id']}: {message['message']}")
+                print(f"\n[{message['sender_id']}] sagt: {message['message']}")
                 print("Geben Sie eine Nachricht ein (oder 'quit' zum Beenden): ", end='', flush=True)
     except Exception as e:
         print(f"Fehler beim Empfangen von Nachrichten: {e}")
+
 
 
 def recv_with_length_prefix(sock):
