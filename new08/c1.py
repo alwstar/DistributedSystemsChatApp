@@ -51,8 +51,7 @@ def connect_to_leader():
         message = json.dumps({"type": "CONNECT", "client_id": client_id}).encode()
         leader_socket.send(message)
         response = leader_socket.recv(BUFFER_SIZE).decode()
-        response_data = json.loads(response)
-        if response_data.get("status") == "OK":
+        if json.loads(response).get("status") == "OK":
             print("Connected to leader successfully.")
             return True
         else:
@@ -117,9 +116,6 @@ def handle_incoming_message(conn):
                 if message['type'] == 'BROADCAST':
                     print(f"\nReceived message from {message['sender_id']}: {message['message']}")
                     print("Enter message (or 'quit' to exit): ", end='', flush=True)
-                elif message['type'] == 'new_leader':
-                    print(f"\nNew leader announced: {message['leader_id']}")
-                    reconnect_to_leader(message['leader_id'])
     except Exception as e:
         print(f"Error handling incoming message: {e}")
 
@@ -131,7 +127,7 @@ def listen_for_messages():
             print(f"Listening for messages on port {CLIENT_LISTEN_PORT}")
             while not shutdown_event.is_set():
                 conn, addr = sock.accept()
-                threading.Thread(target=receive_messages, args=(conn,), daemon=True).start()
+                threading.Thread(target=receive_message, args=(conn,), daemon=True).start()
     except Exception as e:
         print(f"Error in listen_for_messages: {e}")
 
@@ -147,22 +143,6 @@ def reconnect():
             return True
         time.sleep(RECONNECT_INTERVAL)
     return False
-
-
-def reconnect_to_leader(new_leader_id):
-    global leader_ip, leader_socket
-    print(f"Reconnecting to new leader: {new_leader_id}")
-    if leader_socket:
-        leader_socket.close()
-    
-    leader_ip = None
-    while not shutdown_event.is_set():
-        if locate_leader() and connect_to_leader():
-            print("Reconnected to new leader.")
-            return True
-        time.sleep(RECONNECT_INTERVAL)
-    return False
-
 
 def main():
     print(f"Client startet mit ID: {client_id}")
