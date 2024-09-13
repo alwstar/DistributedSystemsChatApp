@@ -62,27 +62,11 @@ def connect_to_leader():
 def send_message(message):
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.connect((leader_ip, MESSAGE_SEND_PORT))
+            sock.connect((leader_ip, CLIENT_LISTEN_PORT))
             data = json.dumps({"type": "CHAT", "client_id": client_id, "message": message}).encode()
             sock.send(data)
     except Exception as e:
         print(f"Error sending message: {e}")
-
-def receive_messages():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(('', MESSAGE_RECEIVE_PORT))
-        sock.listen(1)
-        print(f"Listening for messages on port {MESSAGE_RECEIVE_PORT}")
-        while not shutdown_event.is_set():
-            try:
-                conn, addr = sock.accept()
-                with conn:
-                    data = conn.recv(BUFFER_SIZE)
-                    if data:
-                        message = json.loads(data.decode())
-                        print(f"{message['sender_id']}: {message['content']}")
-            except Exception as e:
-                print(f"Error receiving message: {e}")
 
 def main():
     print(f"Client starting with ID: {client_id}")
@@ -94,8 +78,6 @@ def main():
     if not connect_to_leader():
         print("Failed to connect to the leader. Exiting.")
         return
-
-    threading.Thread(target=receive_messages, daemon=True).start()
 
     while not shutdown_event.is_set():
         message = input("Enter message (or 'quit' to exit): ")

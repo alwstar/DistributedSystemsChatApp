@@ -269,14 +269,17 @@ def listen_for_client_discovery():
             try:
                 data, addr = udp_socket.recvfrom(BUFFER_SIZE)
                 message = json.loads(data.decode())
-                if message.get("type") == "CLIENT_DISCOVERY":
-                    response = json.dumps({
-                        "type": "SERVER_RESPONSE",
-                        "server_id": server_id,
-                        "tcp_port": CLIENT_LISTEN_PORT
-                    }).encode()
-                    udp_socket.sendto(response, addr)
-                    print(f"Responded to client discovery from {addr}")
+                if message.get("type") == "LEADER_REQUEST":
+                    if leader == server_id:
+                        response = json.dumps({
+                            "type": "LEADER_RESPONSE",
+                            "server_id": server_id,
+                            "tcp_port": CLIENT_LISTEN_PORT
+                        }).encode()
+                        udp_socket.sendto(response, addr)
+                        print(f"Responded to client discovery from {addr}")
+                    else:
+                        print(f"Received client discovery from {addr}, but not the leader")
             except Exception as e:
                 print(f"Error in client discovery: {e}")
 
@@ -314,7 +317,8 @@ def handle_client_messages(client_sock, client_id):
                 break
             message_type, message_data = parse_json_message(data.decode())
             if message_type == "CHAT":
-                broadcast_to_clients(client_id, message_data['message'])
+                print(f"Received message from client {client_id}: {message_data['message']}")
+                # Later, we'll implement broadcasting to other clients here
         except Exception as e:
             print(f"Error handling message from client {client_id}: {e}")
             break
