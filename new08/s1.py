@@ -212,7 +212,9 @@ def announce_leader():
             print(f"Error announcing leader to {srv_id}: {e}")
     election_in_progress.clear()
     
-    # Notify all connected clients about the new leader
+    # Benachrichtigen Sie alle verbundenen Clients über den neuen Leader
+    notify_clients_new_leader()
+
 
 def notify_clients_new_leader():
     leader_info = create_json_message("new_leader", leader_id=server_id)
@@ -222,6 +224,7 @@ def notify_clients_new_leader():
         except Exception as e:
             print(f"Error notifying client {client_id} about new leader: {e}")
             del connected_clients[client_id]
+
 
 def get_next_server_in_ring():
     if not connected_servers:
