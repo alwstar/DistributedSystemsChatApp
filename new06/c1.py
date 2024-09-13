@@ -66,7 +66,8 @@ def send_message(message):
         data = json.dumps({"type": "CHAT", "client_id": client_id, "message": message}).encode()
         leader_socket.send(data)
         response = leader_socket.recv(BUFFER_SIZE).decode()
-        print(f"Server response: {json.loads(response)['status']}")
+        response_data = json.loads(response)
+        print(f"Server response: {response_data['status']}")
     except Exception as e:
         print(f"Error sending message: {e}")
         reconnect()
@@ -94,9 +95,13 @@ def listen_to_server():
             if message['type'] == 'BROADCAST':
                 print(f"\nEmpfangene Nachricht von {message['sender_id']}: {message['message']}")
                 print("Geben Sie eine Nachricht ein (oder 'quit' zum Beenden): ", end='', flush=True)
+    except json.JSONDecodeError as e:
+        print(f"Error decoding JSON: {e}")
+    except KeyError as e:
+        print(f"Missing key in message: {e}")
     except Exception as e:
         print(f"Fehler beim Empfangen von Nachrichten: {e}")
-
+        reconnect()
 
 
 def handle_incoming_message(conn):

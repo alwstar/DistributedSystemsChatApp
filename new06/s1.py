@@ -321,15 +321,14 @@ def handle_client_message(message, addr, client_sock):
         client_id = message['client_id']
         connected_clients[client_id] = client_sock
         print(f"Client {client_id} connected from {addr}")
-        return json.dumps({"status": "OK"})
+        return json.dumps({"type": "CONNECT_RESPONSE", "status": "OK"})
     elif message_type == "CHAT":
         client_id = message['client_id']
         chat_message = message['message']
         print(f"Received message from client {client_id}: {chat_message}")
         broadcast_message(client_id, chat_message)
-        return json.dumps({"status": "Message received and broadcasted"})
+        return json.dumps({"type": "CHAT_RESPONSE", "status": "Message received and broadcasted"})
     return None
-
 def broadcast_message(sender_id, message):
     broadcast_data = json.dumps({
         "type": "BROADCAST",
