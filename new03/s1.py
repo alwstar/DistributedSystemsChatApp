@@ -253,7 +253,7 @@ def handle_new_connection(client_socket, addr):
             connected_clients[client_id] = client_socket
             print(f"Client {client_id} connected from {addr}")
             client_socket.send(create_json_message("status", status="OK"))
-            threading.Thread(target=handle_client_messages, args=(client_socket, client_id)).start()
+            threading.Thread(target=handle_client_message, args=(client_socket, client_id)).start()
         else:
             print(f"Unexpected message type from {addr}: {message_type}")
             client_socket.close()
