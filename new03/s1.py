@@ -304,7 +304,7 @@ def handle_client_connection(client_sock, addr):
             if not data:
                 break
             message = json.loads(data.decode())
-            response = handle_client_message(message, addr)
+            response = handle_client_message(message, addr, client_sock)
             if response:
                 client_sock.send(response.encode())
     except Exception as e:
@@ -315,11 +315,11 @@ def handle_client_connection(client_sock, addr):
         client_sock.close()
         print(f"Client {client_id} at {addr} disconnected")
 
-def handle_client_message(message, addr):
+def handle_client_message(message, addr, client_sock):
     message_type = message.get("type")
     if message_type == "CONNECT":
         client_id = message['client_id']
-        connected_clients[client_id] = addr
+        connected_clients[client_id] = client_sock
         print(f"Client {client_id} connected from {addr}")
         return json.dumps({"status": "OK"})
     elif message_type == "CHAT":
@@ -337,14 +337,16 @@ def broadcast_message(sender_id, message):
         "message": message
     }).encode()
     
-    for client_id, client_addr in connected_clients.items():
+    for client_id, client_sock in connected_clients.items():
         if client_id != sender_id:
             try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                    sock.connect((client_addr[0], CLIENT_LISTEN_PORT))
-                    sock.send(broadcast_data)
+                client_sock.send(broadcast_data)
             except Exception as e:
                 print(f"Error broadcasting message to client {client_id}: {e}")
+                # If there's an error, remove the client from connected_clients
+                del connected_clients[client_id]
+                print(f"Removed client {client_id} due to connection error")
+
 
 
 def send_to_client(addr, message):

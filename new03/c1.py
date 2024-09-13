@@ -73,8 +73,10 @@ def send_message(message):
 
 def receive_message(conn):
     try:
-        data = conn.recv(BUFFER_SIZE)
-        if data:
+        while not shutdown_event.is_set():
+            data = conn.recv(BUFFER_SIZE)
+            if not data:
+                break
             message = json.loads(data.decode())
             if message['type'] == 'BROADCAST':
                 print(f"\nReceived message from {message['sender_id']}: {message['message']}")
@@ -83,16 +85,16 @@ def receive_message(conn):
         print(f"Error receiving message: {e}")
 
 def listen_for_messages():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(('', CLIENT_LISTEN_PORT))
-        sock.listen()
-        print(f"Listening for messages on port {CLIENT_LISTEN_PORT}")
-        while not shutdown_event.is_set():
-            try:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(('', CLIENT_LISTEN_PORT))
+            sock.listen()
+            print(f"Listening for messages on port {CLIENT_LISTEN_PORT}")
+            while not shutdown_event.is_set():
                 conn, addr = sock.accept()
                 threading.Thread(target=receive_message, args=(conn,), daemon=True).start()
-            except Exception as e:
-                print(f"Error accepting connection: {e}")
+    except Exception as e:
+        print(f"Error in listen_for_messages: {e}")
 
 def reconnect():
     global leader_socket
