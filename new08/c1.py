@@ -65,11 +65,10 @@ def send_message(message):
     try:
         data = json.dumps({"type": "CHAT", "client_id": client_id, "message": message}).encode()
         leader_socket.send(data)
-        print("Nachricht an den Server gesendet")
+        print("Message sent to server")
     except Exception as e:
-        print(f"Fehler beim Senden der Nachricht: {e}")
+        print(f"Error sending message: {e}")
         reconnect()
-
 
 def receive_messages():
     try:
@@ -85,7 +84,7 @@ def receive_messages():
 
 
 def listen_to_server():
-    global leader_socket, leader_ip
+    global leader_socket
     while not shutdown_event.is_set():
         try:
             leader_socket.settimeout(1)  # Set a timeout of 1 second
@@ -95,21 +94,15 @@ def listen_to_server():
                 if message['type'] == 'BROADCAST':
                     print(f"\nEmpfangene Nachricht von {message['sender_id']}: {message['message']}")
                     print("Geben Sie eine Nachricht ein (oder 'quit' zum Beenden): ", end='', flush=True)
-                elif message['type'] == 'new_leader':
-                    print(f"Neuer Leader erhalten: {message['leader_id']}. Verbindung wird neu hergestellt...")
-                    leader_socket.close()
-                    leader_ip = None
-                    reconnect()
-            else:
-                # Wenn keine Daten empfangen wurden, könnte die Verbindung unterbrochen sein
-                print("Keine Daten empfangen. Versuche, die Verbindung erneut herzustellen...")
-                reconnect()
         except socket.timeout:
             continue  # If no data received, continue the loop
+        except json.JSONDecodeError as e:
+            print(f"Error decoding JSON: {e}")
+        except KeyError as e:
+            print(f"Missing key in message: {e}")
         except Exception as e:
             print(f"Fehler beim Empfangen von Nachrichten: {e}")
             reconnect()
-
 
 
 def handle_incoming_message(conn):
