@@ -31,8 +31,6 @@ ring_formed = threading.Event()
 election_in_progress = threading.Event()
 all_servers_ready = threading.Event()
 election_complete = threading.Event()
-client_data = {}  # Neues Dictionary zur Speicherung von Client-Daten
-data_lock = threading.Lock()  # Lock für Thread-sichere Operationen
 
 def create_json_message(message_type, **kwargs):
     return json.dumps({"type": message_type, **kwargs}).encode()
@@ -145,7 +143,6 @@ def handle_message(message_type, message_data, sender_id):
         if leader != server_id:
             print(f"This server acknowledges {leader} as the leader")
         election_in_progress.clear()
-        election_complete.set()
     elif message_type == "heartbeat":
         pass
     elif message_type == "ready_for_election":
@@ -156,8 +153,6 @@ def handle_message(message_type, message_data, sender_id):
                 connected_servers[sender_id]['socket'].send(create_json_message("leader_alive"))
             except Exception as e:
                 print(f"Error responding to leader check from {sender_id}: {e}")
-    elif message_type == "data_replication":
-        handle_replication_message(message_data)
 
 def handle_election(election_data, sender_id):
     global leader
@@ -335,24 +330,25 @@ def handle_client_message(message, addr, client_sock):
     return None
 
 def broadcast_message(sender_id, message):
-    broadcast_data = create_json_message("BROADCAST", sender_id=sender_id, message=message)
+    if not connected_clients:
+        print("No clients to broadcast the message to.")
+        return
     
-    with data_lock:
-        for client_id, client_sock in list(connected_clients.items()):
-            if client_id != sender_id:
-                try:
-                    client_sock.send(broadcast_data)
-                    print(f"Broadcasted message to client {client_id}")
-                except Exception as e:
-                    print(f"Error broadcasting message to client {client_id}: {e}")
-                    del connected_clients[client_id]
-                    del client_data[client_id]
-                    print(f"Removed client {client_id} due to connection error")
-
-
-def handle_chat_message(client_id, message):
-    print(f"Received message from client {client_id}: {message}")
-    broadcast_message(client_id, message)
+    broadcast_data = json.dumps({
+        "type": "BROADCAST",
+        "sender_id": sender_id,
+        "message": message
+    }).encode()
+    
+    for client_id, client_sock in list(connected_clients.items()):
+        if client_id != sender_id:
+            try:
+                client_sock.send(broadcast_data)
+                print(f"Broadcasted message to client {client_id}")
+            except Exception as e:
+                print(f"Error broadcasting message to client {client_id}: {e}")
+                del connected_clients[client_id]
+                print(f"Removed client {client_id} due to connection error")
 
 
 def handle_client_connection(client_sock, addr):
@@ -363,29 +359,14 @@ def handle_client_connection(client_sock, addr):
             if not data:
                 break
             message = json.loads(data.decode())
-            if message['type'] == "CONNECT":
-                client_id = message['client_id']
-                with data_lock:
-                    connected_clients[client_id] = client_sock
-                    client_data[client_id] = {"address": addr, "last_activity": time.time()}
-                print(f"Client {client_id} connected from {addr}")
-                client_sock.send(create_json_message("CONNECT_RESPONSE", status="OK"))
-            elif message['type'] == "CHAT":
-                handle_chat_message(client_id, message['message'])
-            
-            # Aktualisiere die letzte Aktivität des Clients
-            with data_lock:
-                if client_id in client_data:
-                    client_data[client_id]["last_activity"] = time.time()
+            response = handle_client_message(message, addr, client_sock)
+            if response:
+                client_sock.send(response)
     except Exception as e:
         print(f"Error handling client connection: {e}")
     finally:
-        if client_id:
-            with data_lock:
-                if client_id in connected_clients:
-                    del connected_clients[client_id]
-                if client_id in client_data:
-                    del client_data[client_id]
+        if client_id and client_id in connected_clients:
+            del connected_clients[client_id]
         client_sock.close()
         print(f"Client {client_id} at {addr} disconnected")
 
@@ -441,32 +422,6 @@ def display_status():
     for client_id in connected_clients:
         print(f"  {client_id}")
 
-
-
-def replicate_data():
-    global client_data
-    while not shutdown_event.is_set():
-        with data_lock:
-            data_to_replicate = json.dumps(client_data)
-        
-        for server_id, server_info in connected_servers.items():
-            try:
-                replication_message = create_json_message("data_replication", data=data_to_replicate)
-                server_info['socket'].send(replication_message)
-            except Exception as e:
-                print(f"Error replicating data to server {server_id}: {e}")
-        
-        time.sleep(10)  # Repliziere alle 10 Sekunden
-
-
-def handle_replication_message(message_data):
-    global client_data
-    received_data = json.loads(message_data['data'])
-    with data_lock:
-        client_data.update(received_data)
-    print("Received and updated client data from another server")
-
-
 def main():
     global tcp_port, leader
 
@@ -482,8 +437,7 @@ def main():
     threading.Thread(target=accept_connections, daemon=True).start()
     threading.Thread(target=check_leader_status, daemon=True).start()
     threading.Thread(target=listen_for_clients, daemon=True).start()
-    threading.Thread(target=listen_for_client_discovery, daemon=True).start()
-    threading.Thread(target=replicate_data, daemon=True).start()  # Neue Thread für Datenreplikation
+    threading.Thread(target=listen_for_client_discovery, daemon=True).start()  # New thread for client discovery
 
     ring_formed.wait()
     time.sleep(2)
