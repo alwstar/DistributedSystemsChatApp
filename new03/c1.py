@@ -87,16 +87,35 @@ def receive_messages():
 def listen_to_server():
     try:
         while not shutdown_event.is_set():
-            data = leader_socket.recv(BUFFER_SIZE)
+            data = recv_with_length_prefix(leader_socket)
             if not data:
                 break
+            print(f"Empfangene Rohdaten: {data}")
             message = json.loads(data.decode())
+            print(f"Empfangene Nachricht: {message}")
             if message['type'] == 'BROADCAST':
                 print(f"\nEmpfangene Nachricht von {message['sender_id']}: {message['message']}")
                 print("Geben Sie eine Nachricht ein (oder 'quit' zum Beenden): ", end='', flush=True)
     except Exception as e:
         print(f"Fehler beim Empfangen von Nachrichten: {e}")
 
+
+def recv_with_length_prefix(sock):
+    raw_length = recv_all(sock, 4)
+    if not raw_length:
+        return None
+    length = int.from_bytes(raw_length, byteorder='big')
+    data = recv_all(sock, length)
+    return data
+
+def recv_all(sock, n):
+    data = bytearray()
+    while len(data) < n:
+        packet = sock.recv(n - len(data))
+        if not packet:
+            return None
+        data.extend(packet)
+    return data
 
 
 def handle_incoming_message(conn):

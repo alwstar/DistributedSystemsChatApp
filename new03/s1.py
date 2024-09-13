@@ -336,11 +336,11 @@ def broadcast_message(sender_id, message):
         "sender_id": sender_id,
         "message": message
     }).encode()
-    
+
     for client_id, client_sock in list(connected_clients.items()):
         if client_id != sender_id:
             try:
-                client_sock.send(broadcast_data)
+                send_with_length_prefix(client_sock, broadcast_data)
                 print(f"Broadcasted message to client {client_id}")
             except Exception as e:
                 print(f"Error broadcasting message to client {client_id}: {e}")
@@ -348,6 +348,9 @@ def broadcast_message(sender_id, message):
                 print(f"Removed client {client_id} due to connection error")
 
 
+def send_with_length_prefix(sock, data):
+    length = len(data)
+    sock.sendall(length.to_bytes(4, byteorder='big') + data)
 
 
 def send_to_client(addr, message):
