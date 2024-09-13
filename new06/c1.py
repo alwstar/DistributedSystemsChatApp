@@ -65,9 +65,7 @@ def send_message(message):
     try:
         data = json.dumps({"type": "CHAT", "client_id": client_id, "message": message}).encode()
         leader_socket.send(data)
-        response = leader_socket.recv(BUFFER_SIZE).decode()
-        response_data = json.loads(response)
-        print(f"Server response: {response_data['status']}")
+        print("Message sent to server")
     except Exception as e:
         print(f"Error sending message: {e}")
         reconnect()
@@ -86,22 +84,26 @@ def receive_messages():
 
 
 def listen_to_server():
-    try:
-        while not shutdown_event.is_set():
+    global leader_socket
+    while not shutdown_event.is_set():
+        try:
+            leader_socket.settimeout(1)  # Set a timeout of 1 second
             data = leader_socket.recv(BUFFER_SIZE)
-            if not data:
-                break
-            message = json.loads(data.decode())
-            if message['type'] == 'BROADCAST':
-                print(f"\nEmpfangene Nachricht von {message['sender_id']}: {message['message']}")
-                print("Geben Sie eine Nachricht ein (oder 'quit' zum Beenden): ", end='', flush=True)
-    except json.JSONDecodeError as e:
-        print(f"Error decoding JSON: {e}")
-    except KeyError as e:
-        print(f"Missing key in message: {e}")
-    except Exception as e:
-        print(f"Fehler beim Empfangen von Nachrichten: {e}")
-        reconnect()
+            if data:
+                message = json.loads(data.decode())
+                if message['type'] == 'BROADCAST':
+                    print(f"\nEmpfangene Nachricht von {message['sender_id']}: {message['message']}")
+                    print("Geben Sie eine Nachricht ein (oder 'quit' zum Beenden): ", end='', flush=True)
+        except socket.timeout:
+            continue  # If no data received, continue the loop
+        except json.JSONDecodeError as e:
+            print(f"Error decoding JSON: {e}")
+        except KeyError as e:
+            print(f"Missing key in message: {e}")
+        except Exception as e:
+            print(f"Fehler beim Empfangen von Nachrichten: {e}")
+            reconnect()
+            break
 
 
 def handle_incoming_message(conn):

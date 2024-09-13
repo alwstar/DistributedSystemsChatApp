@@ -296,39 +296,21 @@ def listen_for_clients():
             except Exception as e:
                 print(f"Error accepting client connection: {e}")
 
-def handle_client_connection(client_sock, addr):
-    client_id = None
-    try:
-        while not shutdown_event.is_set():
-            data = client_sock.recv(BUFFER_SIZE)
-            if not data:
-                break
-            message = json.loads(data.decode())
-            response = handle_client_message(message, addr, client_sock)
-            if response:
-                client_sock.send(response.encode())
-    except Exception as e:
-        print(f"Error handling client connection: {e}")
-    finally:
-        if client_id and client_id in connected_clients:
-            del connected_clients[client_id]
-        client_sock.close()
-        print(f"Client {client_id} at {addr} disconnected")
-
 def handle_client_message(message, addr, client_sock):
     message_type = message.get("type")
     if message_type == "CONNECT":
         client_id = message['client_id']
         connected_clients[client_id] = client_sock
         print(f"Client {client_id} connected from {addr}")
-        return json.dumps({"type": "CONNECT_RESPONSE", "status": "OK"})
+        return json.dumps({"type": "CONNECT_RESPONSE", "status": "OK"}).encode()
     elif message_type == "CHAT":
         client_id = message['client_id']
         chat_message = message['message']
         print(f"Received message from client {client_id}: {chat_message}")
         broadcast_message(client_id, chat_message)
-        return json.dumps({"type": "CHAT_RESPONSE", "status": "Message received and broadcasted"})
+        return json.dumps({"type": "CHAT_RESPONSE", "status": "Message received and broadcasted"}).encode()
     return None
+
 def broadcast_message(sender_id, message):
     broadcast_data = json.dumps({
         "type": "BROADCAST",
@@ -346,7 +328,24 @@ def broadcast_message(sender_id, message):
                 del connected_clients[client_id]
                 print(f"Removed client {client_id} due to connection error")
 
-
+def handle_client_connection(client_sock, addr):
+    client_id = None
+    try:
+        while not shutdown_event.is_set():
+            data = client_sock.recv(BUFFER_SIZE)
+            if not data:
+                break
+            message = json.loads(data.decode())
+            response = handle_client_message(message, addr, client_sock)
+            if response:
+                client_sock.send(response)
+    except Exception as e:
+        print(f"Error handling client connection: {e}")
+    finally:
+        if client_id and client_id in connected_clients:
+            del connected_clients[client_id]
+        client_sock.close()
+        print(f"Client {client_id} at {addr} disconnected")
 
 
 def send_to_client(addr, message):
