@@ -313,7 +313,7 @@ def handle_client_connection(client_sock, addr):
         if client_id and client_id in connected_clients:
             del connected_clients[client_id]
         client_sock.close()
-        print(f"Client at {addr} disconnected")
+        print(f"Client {client_id} at {addr} disconnected")
 
 def handle_client_message(message, addr):
     message_type = message.get("type")
@@ -326,10 +326,26 @@ def handle_client_message(message, addr):
         client_id = message['client_id']
         chat_message = message['message']
         print(f"Received message from client {client_id}: {chat_message}")
-        # Here you would implement logic to broadcast the message to other clients
-        # For now, we'll just acknowledge receipt
-        return json.dumps({"status": "Message received"})
+        broadcast_message(client_id, chat_message)
+        return json.dumps({"status": "Message received and broadcasted"})
     return None
+
+def broadcast_message(sender_id, message):
+    broadcast_data = json.dumps({
+        "type": "BROADCAST",
+        "sender_id": sender_id,
+        "message": message
+    }).encode()
+    
+    for client_id, client_addr in connected_clients.items():
+        if client_id != sender_id:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.connect((client_addr[0], CLIENT_LISTEN_PORT))
+                    sock.send(broadcast_data)
+            except Exception as e:
+                print(f"Error broadcasting message to client {client_id}: {e}")
+
 
 def send_to_client(addr, message):
     try:
