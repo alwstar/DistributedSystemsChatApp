@@ -122,8 +122,6 @@ def handle_server_connection(server_socket, remote_server_id):
     if remote_server_id in connected_servers:
         del connected_servers[remote_server_id]
     print(f"Connection with server {remote_server_id} closed")
-    if leader == remote_server_id:
-        start_election()
 
 def send_heartbeat(server_socket, remote_server_id):
     while not shutdown_event.is_set() and remote_server_id in connected_servers:
@@ -203,7 +201,9 @@ def forward_election(election_data):
             print(f"Error forwarding election message to {next_server}: {e}")
 
 def announce_leader():
+    global leader
     print(f"Announcing self as leader: {server_id}")
+    leader = server_id
     leader_message = create_json_message("leader_announcement", leader_id=server_id)
     for srv_id, srv_info in connected_servers.items():
         try:
@@ -211,6 +211,17 @@ def announce_leader():
         except Exception as e:
             print(f"Error announcing leader to {srv_id}: {e}")
     election_in_progress.clear()
+    
+    # Notify all connected clients about the new leader
+
+def notify_clients_new_leader():
+    leader_info = create_json_message("new_leader", leader_id=server_id)
+    for client_id, client_sock in list(connected_clients.items()):
+        try:
+            client_sock.send(leader_info)
+        except Exception as e:
+            print(f"Error notifying client {client_id} about new leader: {e}")
+            del connected_clients[client_id]
 
 def get_next_server_in_ring():
     if not connected_servers:
@@ -280,8 +291,6 @@ def listen_for_client_discovery():
                         }).encode()
                         udp_socket.sendto(response, addr)
                         print(f"Responded to client discovery from {addr}")
-                    else:
-                        print(f"Received client discovery from {addr}, but not the leader")
             except Exception as e:
                 print(f"Error in client discovery: {e}")
 
@@ -304,7 +313,7 @@ def handle_client_message(message, addr, client_sock):
         client_id = message['client_id']
         connected_clients[client_id] = client_sock
         print(f"Client {client_id} connected from {addr}")
-        return json.dumps({"type": "CONNECT_RESPONSE", "status": "OK"}).encode()
+        return json.dumps({"type": "CONNECT_RESPONSE", "status": "OK", "leader_id": server_id}).encode()
     elif message_type == "CHAT":
         client_id = message['client_id']
         chat_message = message['message']
@@ -414,7 +423,7 @@ def main():
     threading.Thread(target=accept_connections, daemon=True).start()
     threading.Thread(target=check_leader_status, daemon=True).start()
     threading.Thread(target=listen_for_clients, daemon=True).start()
-    threading.Thread(target=listen_for_client_discovery, daemon=True).start()  # New thread for client discovery
+    threading.Thread(target=listen_for_client_discovery, daemon=True).start()
 
     ring_formed.wait()
     time.sleep(2)
