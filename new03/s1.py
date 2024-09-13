@@ -337,15 +337,16 @@ def broadcast_message(sender_id, message):
         "message": message
     }).encode()
     
-    for client_id, client_sock in connected_clients.items():
+    for client_id, client_sock in list(connected_clients.items()):
         if client_id != sender_id:
             try:
                 client_sock.send(broadcast_data)
+                print(f"Broadcasted message to client {client_id}")
             except Exception as e:
                 print(f"Error broadcasting message to client {client_id}: {e}")
-                # If there's an error, remove the client from connected_clients
                 del connected_clients[client_id]
                 print(f"Removed client {client_id} due to connection error")
+
 
 
 
