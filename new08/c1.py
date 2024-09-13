@@ -103,7 +103,6 @@ def listen_to_server():
         except Exception as e:
             print(f"Fehler beim Empfangen von Nachrichten: {e}")
             reconnect()
-            break
 
 
 def handle_incoming_message(conn):
@@ -133,12 +132,17 @@ def listen_for_messages():
         print(f"Error in listen_for_messages: {e}")
 
 def reconnect():
-    global leader_socket
+    global leader_socket, leader_ip
+    print("Connection to leader lost. Attempting to reconnect...")
+    if leader_socket:
+        leader_socket.close()
+    leader_ip = None
     while not shutdown_event.is_set():
-        print("Attempting to reconnect...")
         if locate_leader() and connect_to_leader():
-            break
+            print("Reconnected to new leader.")
+            return True
         time.sleep(RECONNECT_INTERVAL)
+    return False
 
 def main():
     print(f"Client startet mit ID: {client_id}")
@@ -151,7 +155,6 @@ def main():
         print("Verbindung zum Leader fehlgeschlagen. Beende.")
         return
 
-    # Starte den Thread zum Empfangen von Nachrichten vom Server
     server_listen_thread = threading.Thread(target=listen_to_server, daemon=True)
     server_listen_thread.start()
 
