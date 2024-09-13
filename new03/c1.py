@@ -83,22 +83,6 @@ def receive_messages():
     except Exception as e:
         print(f"Error in receive_messages: {e}")
 
-
-def listen_to_server():
-    try:
-        while not shutdown_event.is_set():
-            data = leader_socket.recv(BUFFER_SIZE)
-            if not data:
-                break
-            message = json.loads(data.decode())
-            if message['type'] == 'BROADCAST':
-                print(f"\nEmpfangene Nachricht von {message['sender_id']}: {message['message']}")
-                print("Geben Sie eine Nachricht ein (oder 'quit' zum Beenden): ", end='', flush=True)
-    except Exception as e:
-        print(f"Fehler beim Empfangen von Nachrichten: {e}")
-
-
-
 def handle_incoming_message(conn):
     try:
         with conn:
@@ -134,22 +118,21 @@ def reconnect():
         time.sleep(RECONNECT_INTERVAL)
 
 def main():
-    print(f"Client startet mit ID: {client_id}")
+    print(f"Client starting with ID: {client_id}")
     
     if not locate_leader():
-        print("Kein Leader gefunden. Beende.")
+        print("Failed to locate a leader. Exiting.")
         return
 
     if not connect_to_leader():
-        print("Verbindung zum Leader fehlgeschlagen. Beende.")
+        print("Failed to connect to the leader. Exiting.")
         return
 
-    # Starte den Thread zum Empfangen von Nachrichten vom Server
-    server_listen_thread = threading.Thread(target=listen_to_server, daemon=True)
-    server_listen_thread.start()
+    receive_thread = threading.Thread(target=receive_messages, daemon=True)
+    receive_thread.start()
 
     while not shutdown_event.is_set():
-        message = input("Geben Sie eine Nachricht ein (oder 'quit' zum Beenden): ")
+        message = input("Enter message (or 'quit' to exit): ")
         if message.lower() == 'quit':
             shutdown_event.set()
             break
@@ -157,4 +140,7 @@ def main():
 
     if leader_socket:
         leader_socket.close()
-    print("Client getrennt.")
+    print("Client disconnected.")
+
+if __name__ == "__main__":
+    main()
