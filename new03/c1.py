@@ -64,12 +64,38 @@ def connect_to_leader():
 def send_message(message):
     try:
         data = json.dumps({"type": "CHAT", "client_id": client_id, "message": message}).encode()
-        leader_socket.send(data)
-        response = leader_socket.recv(BUFFER_SIZE).decode()
-        print(f"Server response: {json.loads(response)['status']}")
+        send_with_length_prefix(leader_socket, data)
+        response_data = recv_with_length_prefix(leader_socket)
+        if response_data:
+            response = json.loads(response_data.decode())
+            print(f"Server response: {response['status']}")
     except Exception as e:
         print(f"Error sending message: {e}")
         reconnect()
+
+
+def send_with_length_prefix(sock, data):
+    length = len(data)
+    sock.sendall(length.to_bytes(4, byteorder='big') + data)
+
+def recv_with_length_prefix(sock):
+    raw_length = recv_all(sock, 4)
+    if not raw_length:
+        return None
+    length = int.from_bytes(raw_length, byteorder='big')
+    data = recv_all(sock, length)
+    return data
+
+def recv_all(sock, n):
+    data = bytearray()
+    while len(data) < n:
+        packet = sock.recv(n - len(data))
+        if not packet:
+            return None
+        data.extend(packet)
+    return data
+
+
 
 def receive_messages():
     try:

@@ -235,25 +235,19 @@ def accept_connections():
 
 def handle_new_connection(client_socket, addr):
     try:
-        data = client_socket.recv(BUFFER_SIZE)
-        message_type, message_data = parse_json_message(data.decode())
-        if message_type == "server_hello":
-            remote_server_id = message_data['id']
-            if remote_server_id not in connected_servers and remote_server_id != server_id:
-                connected_servers[remote_server_id] = {'socket': client_socket, 'address': addr[0], 'port': addr[1]}
-                print(f"Server {remote_server_id} connected from {addr}")
-                client_socket.send(create_json_message("server_hello_ack"))
-                threading.Thread(target=handle_server_connection, args=(client_socket, remote_server_id)).start()
-                threading.Thread(target=send_heartbeat, args=(client_socket, remote_server_id)).start()
-            else:
-                print(f"Duplicate connection attempt from {remote_server_id}. Ignoring.")
-                client_socket.close()
-        elif message_type == "CONNECT":
-            client_id = message_data['client_id']
+        data = recv_with_length_prefix(client_socket)
+        if not data:
+            client_socket.close()
+            return
+        message = json.loads(data.decode())
+        message_type = message.get("type")
+        if message_type == "CONNECT":
+            client_id = message['client_id']
             connected_clients[client_id] = client_socket
             print(f"Client {client_id} connected from {addr}")
-            client_socket.send(create_json_message("status", status="OK"))
-            threading.Thread(target=handle_client_message, args=(client_socket, client_id)).start()
+            response = json.dumps({"status": "OK"}).encode()
+            send_with_length_prefix(client_socket, response)
+            threading.Thread(target=handle_client_connection, args=(client_socket, client_id)).start()
         else:
             print(f"Unexpected message type from {addr}: {message_type}")
             client_socket.close()
@@ -296,24 +290,30 @@ def listen_for_clients():
             except Exception as e:
                 print(f"Error accepting client connection: {e}")
 
-def handle_client_connection(client_sock, addr):
-    client_id = None
+def handle_client_connection(client_socket, client_id):
     try:
         while not shutdown_event.is_set():
-            data = client_sock.recv(BUFFER_SIZE)
+            data = recv_with_length_prefix(client_socket)
             if not data:
                 break
             message = json.loads(data.decode())
-            response = handle_client_message(message, addr, client_sock)
-            if response:
-                client_sock.send(response.encode())
+            message_type = message.get("type")
+            if message_type == "CHAT":
+                chat_message = message['message']
+                print(f"Received message from client {client_id}: {chat_message}")
+                broadcast_message(client_id, chat_message)
+                # Senden einer Bestätigung an den Client
+                response = json.dumps({"status": "Message received and broadcasted"}).encode()
+                send_with_length_prefix(client_socket, response)
+            else:
+                print(f"Unknown message type from client {client_id}: {message_type}")
     except Exception as e:
         print(f"Error handling client connection: {e}")
     finally:
-        if client_id and client_id in connected_clients:
+        client_socket.close()
+        if client_id in connected_clients:
             del connected_clients[client_id]
-        client_sock.close()
-        print(f"Client {client_id} at {addr} disconnected")
+        print(f"Client {client_id} disconnected")
 
 def handle_client_message(message, addr, client_sock):
     message_type = message.get("type")
