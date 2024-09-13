@@ -10,7 +10,7 @@ CLIENT_LISTEN_PORT = 5001
 MESSAGE_SEND_PORT = 5002
 MESSAGE_RECEIVE_PORT = 5003
 BUFFER_SIZE = 1024
-RECONNECT_INTERVAL = 5
+RECONNECT_INTERVAL = 10
 
 # Global variables
 client_id = f"CLIENT_{random.randint(1000, 9999)}_{int(time.time())}"
@@ -25,7 +25,7 @@ def locate_leader():
         udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         udp_socket.settimeout(1)
         attempt = 0
-        max_attempts = 5
+        max_attempts = 10
         while attempt < max_attempts and not shutdown_event.is_set():
             try:
                 message = json.dumps({"type": "LEADER_REQUEST", "client_id": client_id}).encode()
