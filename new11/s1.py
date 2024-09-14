@@ -302,19 +302,23 @@ def listen_for_clients():
 
 
 def handle_client_message(message, addr, client_sock):
+    client_id = None
     message_type = message.get("type")
     if message_type == "CONNECT":
         client_id = message['client_id']
         client_connections[client_id] = {'socket': client_sock, 'address': addr}
         print(f"Client {client_id} connected from {addr}")
-        return json.dumps({"type": "CONNECT_RESPONSE", "status": "OK", "leader_id": leader}).encode()
+        response = json.dumps({"type": "CONNECT_RESPONSE", "status": "OK", "leader_id": leader}).encode()
+        return response, client_id
     elif message_type == "CHAT":
         client_id = message['client_id']
         chat_message = message['message']
         print(f"Received message from client {client_id}: {chat_message}")
         broadcast_message(client_id, chat_message)
-        return json.dumps({"type": "CHAT_RESPONSE", "status": "Message received and broadcasted"}).encode()
-    return None
+        response = json.dumps({"type": "CHAT_RESPONSE", "status": "Message received and broadcasted"}).encode()
+        return response, client_id
+    return None, client_id
+
 
 def broadcast_message(sender_id, message):
     broadcast_data = json.dumps({
@@ -351,6 +355,8 @@ def handle_client_connection(client_sock, addr):
             del client_connections[client_id]
         client_sock.close()
         print(f"Client {client_id} at {addr} disconnected")
+        print(f"Aktuell verbundene Clients: {list(client_connections.keys())}")
+
 
 def send_to_client(addr, message):
     try:
