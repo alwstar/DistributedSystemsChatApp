@@ -213,15 +213,6 @@ def forward_election(election_data):
         except Exception as e:
             print(f"Error forwarding election message to {next_server}: {e}")
 
-def announce_leader():
-    print(f"Announcing self as leader: {server_id}")
-    leader_message = create_json_message("leader_announcement", leader_id=server_id)
-    for srv_id, srv_info in connected_servers.items():
-        try:
-            srv_info['socket'].send(leader_message)
-        except Exception as e:
-            print(f"Error announcing leader to {srv_id}: {e}")
-    election_in_progress.clear()
 
 def get_next_server_in_ring():
     if not connected_servers:

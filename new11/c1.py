@@ -87,27 +87,33 @@ def listen_to_server():
     global leader_socket
     while not shutdown_event.is_set():
         try:
-            leader_socket.settimeout(1)  # Setze ein Timeout von 1 Sekunde
+            leader_socket.settimeout(1)
             data = leader_socket.recv(BUFFER_SIZE)
             if data:
                 message = json.loads(data.decode())
+                print(f"Nachricht vom Server empfangen: {message}")  # Debug-Ausgabe
                 if message['type'] == 'BROADCAST':
                     print(f"\nEmpfangene Nachricht von {message['sender_id']}: {message['message']}")
                     print("Geben Sie eine Nachricht ein (oder 'quit' zum Beenden): ", end='', flush=True)
                 elif message['type'] == 'reconnect':
                     print("Server hat einen Reconnect angefordert.")
+                    leader_socket.close()
                     reconnect()
-                    break  # Beende den Thread, nachdem reconnect() aufgerufen wurde
+                    break
+            else:
+                # Wenn keine Daten empfangen wurden, Verbindung verloren
+                print("Verbindung zum Server verloren.")
+                leader_socket.close()
+                reconnect()
+                break
         except socket.timeout:
-            continue  # Wenn keine Daten empfangen wurden, Schleife fortsetzen
-        except json.JSONDecodeError as e:
-            print(f"Fehler beim Dekodieren von JSON: {e}")
-        except KeyError as e:
-            print(f"Fehlender Schlüssel in Nachricht: {e}")
+            continue
         except Exception as e:
             print(f"Fehler beim Empfangen von Nachrichten: {e}")
+            leader_socket.close()
             reconnect()
             break
+
 
 
 def handle_incoming_message(conn):
@@ -138,11 +144,17 @@ def listen_for_messages():
 
 def reconnect():
     global leader_socket
+    if leader_socket:
+        leader_socket.close()
     while not shutdown_event.is_set():
-        print("Attempting to reconnect...")
+        print("Versuche, erneut zu verbinden...")
         if locate_leader() and connect_to_leader():
+            print("Erneute Verbindung erfolgreich.")
+            # Starten Sie den Thread zum Empfangen von Nachrichten erneut
+            threading.Thread(target=listen_to_server, daemon=True).start()
             break
         time.sleep(RECONNECT_INTERVAL)
+
 
 def main():
     print(f"Client startet mit ID: {client_id}")
