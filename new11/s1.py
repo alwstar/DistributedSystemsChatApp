@@ -303,21 +303,23 @@ def listen_for_clients():
 
 def handle_client_message(message, addr, client_sock):
     client_id = None
+    response = None
     message_type = message.get("type")
     if message_type == "CONNECT":
         client_id = message['client_id']
         client_connections[client_id] = {'socket': client_sock, 'address': addr}
         print(f"Client {client_id} connected from {addr}")
         response = json.dumps({"type": "CONNECT_RESPONSE", "status": "OK", "leader_id": leader}).encode()
-        return response, client_id
     elif message_type == "CHAT":
         client_id = message['client_id']
         chat_message = message['message']
         print(f"Received message from client {client_id}: {chat_message}")
         broadcast_message(client_id, chat_message)
         response = json.dumps({"type": "CHAT_RESPONSE", "status": "Message received and broadcasted"}).encode()
-        return response, client_id
-    return None, client_id
+    else:
+        print(f"Unknown message type: {message_type}")
+    return response, client_id
+
 
 
 def broadcast_message(sender_id, message):
@@ -337,6 +339,7 @@ def broadcast_message(sender_id, message):
                 del client_connections[client_id]
                 print(f"Removed client {client_id} due to connection error")
 
+
 def handle_client_connection(client_sock, addr):
     client_id = None
     try:
@@ -345,9 +348,15 @@ def handle_client_connection(client_sock, addr):
             if not data:
                 break
             message = json.loads(data.decode())
-            response = handle_client_message(message, addr, client_sock)
+            response, client_id_temp = handle_client_message(message, addr, client_sock)
+            if client_id_temp:
+                client_id = client_id_temp  # Aktualisieren Sie client_id
             if response:
                 client_sock.send(response)
+            # Fügen Sie folgende Zeile hinzu
+            if message.get('type') == 'DISCONNECT':
+                print(f"Client {client_id} requested disconnection.")
+                break
     except Exception as e:
         print(f"Error handling client connection: {e}")
     finally:
@@ -402,11 +411,18 @@ def reconnect_clients():
         reconnect_message = create_json_message("reconnect", new_leader_id=server_id)
         for client_id, client_info in list(client_connections.items()):
             try:
-                client_info['socket'].send(reconnect_message)
-                print(f"Sent reconnect message to client {client_id}")
+                client_socket = client_info['socket']
+                if client_socket:
+                    client_socket.send(reconnect_message)
+                    print(f"Sent reconnect message to client {client_id}")
+                else:
+                    print(f"No valid socket for client {client_id}")
             except Exception as e:
                 print(f"Error sending reconnect message to client {client_id}: {e}")
-                del client_connections[client_id]
+                # Entfernen Sie den Client nicht aus client_connections
+                # del client_connections[client_id]
+
+
 
 def display_status():
     print(f"\nServer ID: {server_id}")
