@@ -87,19 +87,23 @@ def listen_to_server():
     global leader_socket
     while not shutdown_event.is_set():
         try:
-            leader_socket.settimeout(1)  # Set a timeout of 1 second
+            leader_socket.settimeout(1)  # Setze ein Timeout von 1 Sekunde
             data = leader_socket.recv(BUFFER_SIZE)
             if data:
                 message = json.loads(data.decode())
                 if message['type'] == 'BROADCAST':
                     print(f"\nEmpfangene Nachricht von {message['sender_id']}: {message['message']}")
                     print("Geben Sie eine Nachricht ein (oder 'quit' zum Beenden): ", end='', flush=True)
+                elif message['type'] == 'reconnect':
+                    print("Server hat einen Reconnect angefordert.")
+                    reconnect()
+                    break  # Beende den Thread, nachdem reconnect() aufgerufen wurde
         except socket.timeout:
-            continue  # If no data received, continue the loop
+            continue  # Wenn keine Daten empfangen wurden, Schleife fortsetzen
         except json.JSONDecodeError as e:
-            print(f"Error decoding JSON: {e}")
+            print(f"Fehler beim Dekodieren von JSON: {e}")
         except KeyError as e:
-            print(f"Missing key in message: {e}")
+            print(f"Fehlender Schlüssel in Nachricht: {e}")
         except Exception as e:
             print(f"Fehler beim Empfangen von Nachrichten: {e}")
             reconnect()
