@@ -185,6 +185,14 @@ def start_election():
         
         threading.Timer(ELECTION_TIMEOUT, end_election_timeout).start()
 
+def end_election_timeout():
+    global leader
+    if election_in_progress.is_set():
+        print("Election timeout reached. Assuming leadership.")
+        leader = server_id
+        announce_leader()
+        election_in_progress.clear()
+
 def announce_leader():
     print(f"Announcing self as leader: {server_id}")
     leader_message = create_json_message("leader_announcement", leader_id=server_id)
