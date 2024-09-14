@@ -24,6 +24,7 @@ server_id = f"SERVER_{random.randint(1000, 9999)}_{int(time.time())}"
 tcp_port = None
 connected_servers = {}
 connected_clients = {}
+client_connections = {}
 leader = None
 is_active = True
 shutdown_event = threading.Event()
@@ -165,6 +166,7 @@ def handle_election(election_data, sender_id):
     else:
         leader = server_id
         announce_leader()
+        reconnect_clients()  # Neue Funktion zum Wiederverbinden der Clients
 
 def start_election():
     global leader
@@ -183,13 +185,16 @@ def start_election():
         
         threading.Timer(ELECTION_TIMEOUT, end_election_timeout).start()
 
-def end_election_timeout():
-    global leader
-    if election_in_progress.is_set():
-        print("Election timeout reached. Assuming leadership.")
-        leader = server_id
-        announce_leader()
-        election_in_progress.clear()
+def announce_leader():
+    print(f"Announcing self as leader: {server_id}")
+    leader_message = create_json_message("leader_announcement", leader_id=server_id)
+    for srv_id, srv_info in connected_servers.items():
+        try:
+            srv_info['socket'].send(leader_message)
+        except Exception as e:
+            print(f"Error announcing leader to {srv_id}: {e}")
+    election_in_progress.clear()
+    reconnect_clients()  # Fügen Sie dies hinzu, um sicherzustellen, dass Clients sich nach der Leaderwahl neu verbinden
 
 def forward_election(election_data):
     election_message = create_json_message("election", **election_data)
@@ -296,13 +301,14 @@ def listen_for_clients():
             except Exception as e:
                 print(f"Error accepting client connection: {e}")
 
+
 def handle_client_message(message, addr, client_sock):
     message_type = message.get("type")
     if message_type == "CONNECT":
         client_id = message['client_id']
-        connected_clients[client_id] = client_sock
+        client_connections[client_id] = {'socket': client_sock, 'address': addr}
         print(f"Client {client_id} connected from {addr}")
-        return json.dumps({"type": "CONNECT_RESPONSE", "status": "OK"}).encode()
+        return json.dumps({"type": "CONNECT_RESPONSE", "status": "OK", "leader_id": leader}).encode()
     elif message_type == "CHAT":
         client_id = message['client_id']
         chat_message = message['message']
@@ -318,14 +324,14 @@ def broadcast_message(sender_id, message):
         "message": message
     }).encode()
     
-    for client_id, client_sock in list(connected_clients.items()):
+    for client_id, client_info in list(client_connections.items()):
         if client_id != sender_id:
             try:
-                client_sock.send(broadcast_data)
+                client_info['socket'].send(broadcast_data)
                 print(f"Broadcasted message to client {client_id}")
             except Exception as e:
                 print(f"Error broadcasting message to client {client_id}: {e}")
-                del connected_clients[client_id]
+                del client_connections[client_id]
                 print(f"Removed client {client_id} due to connection error")
 
 def handle_client_connection(client_sock, addr):
@@ -342,11 +348,10 @@ def handle_client_connection(client_sock, addr):
     except Exception as e:
         print(f"Error handling client connection: {e}")
     finally:
-        if client_id and client_id in connected_clients:
-            del connected_clients[client_id]
+        if client_id and client_id in client_connections:
+            del client_connections[client_id]
         client_sock.close()
         print(f"Client {client_id} at {addr} disconnected")
-
 
 def send_to_client(addr, message):
     try:
@@ -385,6 +390,19 @@ def check_leader_status():
         elif not leader:
             start_election()
 
+def reconnect_clients():
+    global client_connections
+    if leader == server_id:
+        print("Reconnecting clients to new leader")
+        reconnect_message = create_json_message("reconnect", new_leader_id=server_id)
+        for client_id, client_info in list(client_connections.items()):
+            try:
+                client_info['socket'].send(reconnect_message)
+                print(f"Sent reconnect message to client {client_id}")
+            except Exception as e:
+                print(f"Error sending reconnect message to client {client_id}: {e}")
+                del client_connections[client_id]
+
 def display_status():
     print(f"\nServer ID: {server_id}")
     print(f"TCP Port: {tcp_port}")
@@ -412,7 +430,7 @@ def main():
     threading.Thread(target=accept_connections, daemon=True).start()
     threading.Thread(target=check_leader_status, daemon=True).start()
     threading.Thread(target=listen_for_clients, daemon=True).start()
-    threading.Thread(target=listen_for_client_discovery, daemon=True).start()  # New thread for client discovery
+    threading.Thread(target=listen_for_client_discovery, daemon=True).start()
 
     ring_formed.wait()
     time.sleep(2)
@@ -447,8 +465,8 @@ def main():
 
     for srv_info in connected_servers.values():
         srv_info['socket'].close()
-    for client_sock in connected_clients.values():
-        client_sock.close()
+    for client_info in client_connections.values():
+        client_info['socket'].close()
 
 if __name__ == "__main__":
     main()
