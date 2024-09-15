@@ -2,6 +2,7 @@ import socket
 import threading
 import random
 import time
+import uuid
 
 is_leader = False
 server_id = None
@@ -19,6 +20,7 @@ class Server:
         self.lock = threading.Lock()
         self.running = True
         self.next_server_id = 0
+        self.inactive_server_uuids = []
 
     def get_random_port(self, start, end):
         return random.randint(start, end)
@@ -45,18 +47,31 @@ class Server:
             try:
                 data, addr = handshake_socket.recvfrom(1024)
                 message = data.decode('utf-8')
-                if message == "REQUEST_CONNECTION_CLIENT":
+                if message.startswith("REQUEST_CONNECTION_CLIENT"):
                     response = f"{self.get_ip_address()}:{self.data_port}"
                     handshake_socket.sendto(response.encode('utf-8'), addr)
                     print(f"Handshake response sent to {addr}: {response}")
-                elif message == "REQUEST_CONNECTION_INACTIVE_SERVER":
-                    response = f"{self.get_ip_address()}:{self.data_port}:{self.next_server_id}"
-                    self.next_server_id += 1
-                    handshake_socket.sendto(response.encode('utf-8'), addr)
-                    print(f"Handshake response sent to {addr}: {response}")
+                elif message.startswith("REQUEST_CONNECTION_INACTIVE_SERVER"):
+                    # Extract the UUID from the handshake message
+                    parts = message.split(':')
+                    if len(parts) == 2:
+                        inactive_server_uuid = parts[1]
+                        # Add the UUID to the list if not already present
+                        if inactive_server_uuid not in self.inactive_server_uuids:
+                            self.inactive_server_uuids.append(inactive_server_uuid)
+                        # Sort the UUIDs to determine server IDs
+                        sorted_uuids = sorted(self.inactive_server_uuids)
+                        server_id = sorted_uuids.index(inactive_server_uuid)
+                        response = f"{self.get_ip_address()}:{self.data_port}:{server_id}"
+                        handshake_socket.sendto(response.encode('utf-8'), addr)
+                        print(f"Handshake response sent to {addr}: {response}")
+                    else:
+                        print(f"Invalid handshake message from {addr}: {message}")
             except Exception as e:
                 print(f"Error during handshake: {e}")
                 break
+
+
 
     def get_ip_address(self):
         hostname = socket.gethostname()
@@ -124,6 +139,7 @@ class Server:
 
 class InactiveServer:
     def __init__(self, server_ip, handshake_ports=[60000, 60001, 60002]):
+        self.uuid = str(uuid.uuid4())  # Generate a unique UUID for this server
         self.server_ip = server_ip
         self.handshake_ports = handshake_ports
         self.data_port = None
@@ -152,31 +168,38 @@ class InactiveServer:
 
     def perform_handshake(self):
         global server_id
-        for port in self.handshake_ports:
-            handshake_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            handshake_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            handshake_socket.settimeout(0.1)
-            handshake_message = "REQUEST_CONNECTION_INACTIVE_SERVER"
-            handshake_socket.sendto(handshake_message.encode('utf-8'), ('<broadcast>', port))
-            print(f"Sent handshake request to broadcast address on port {port}")
-            try:
-                response, server_address = handshake_socket.recvfrom(1024)
-                server_info = response.decode('utf-8')
-                self.server_ip, self.data_port, server_id = server_info.split(':')
-                self.data_port = int(self.data_port)
-                server_id = int(server_id)
-                print(f"Received handshake response from {server_address}: IP {self.server_ip}, Port {self.data_port}, Server ID {server_id}")
-                return
-            except socket.timeout:
-                print(f"Handshake response timed out on port {port}. Trying next port...")
+        handshake_attempts = 0
+        max_attempts = 5  # Maximum number of handshake attempts
+        while handshake_attempts < max_attempts:
+            for port in self.handshake_ports:
+                handshake_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                handshake_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                handshake_socket.settimeout(0.5)  # Increased timeout for reliability
+                # Include UUID in the handshake message
+                handshake_message = f"REQUEST_CONNECTION_INACTIVE_SERVER:{self.uuid}"
+                handshake_socket.sendto(handshake_message.encode('utf-8'), ('<broadcast>', port))
+                print(f"Sent handshake request with UUID to broadcast address on port {port}")
+                try:
+                    response, server_address = handshake_socket.recvfrom(1024)
+                    server_info = response.decode('utf-8')
+                    # The server response includes IP, data_port, and server_id
+                    self.server_ip, self.data_port, server_id = server_info.split(':')
+                    self.data_port = int(self.data_port)
+                    server_id = int(server_id)
+                    print(f"Received handshake response from {server_address}: IP {self.server_ip}, Port {self.data_port}, Server ID {server_id}")
+                    return  # Handshake successful
+                except socket.timeout:
+                    print(f"Handshake response timed out on port {port}. Trying next port...")
+                except ValueError:
+                    print(f"Invalid handshake response from server: {server_info}")
+            handshake_attempts += 1
+            time.sleep(0.5)
+        # If handshake fails after max_attempts
         if server_id is None:
-            print("Failed to receive handshake response from all ports. Retrying...")
-            time.sleep(0.1)
-            self.perform_handshake()
-        else:
             print("Failed to receive handshake response from all ports. Becoming new leader")
             server_id = 0
             self.election()
+
 
 
     def start_heartbeat(self):
