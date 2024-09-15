@@ -2,13 +2,16 @@ import socket
 import threading
 import random
 import time
+import uuid
 
 is_leader = False
 server_id = None
+server_uuid = uuid.uuid4()
 
 # Server class to handle the connection and communication
 class Server:
     def __init__(self, handshake_ports=[60000, 60001, 60002, 60003]):
+        print(f"My UUID is {server_uuid}")
         self.handshake_ports = handshake_ports
         self.handshake_port = None
         self.data_port = self.get_random_port(49152, 59999)
@@ -50,8 +53,7 @@ class Server:
                     handshake_socket.sendto(response.encode('utf-8'), addr)
                     print(f"Handshake response sent to {addr}: {response}")
                 elif message == "REQUEST_CONNECTION_INACTIVE_SERVER":
-                    response = f"{self.get_ip_address()}:{self.data_port}:{self.next_server_id}"
-                    self.next_server_id += 1
+                    response = f"{self.get_ip_address()}:{self.data_port}"
                     handshake_socket.sendto(response.encode('utf-8'), addr)
                     print(f"Handshake response sent to {addr}: {response}")
             except Exception as e:
@@ -124,6 +126,7 @@ class Server:
 
 class InactiveServer:
     def __init__(self, server_ip, handshake_ports=[60000, 60001, 60002]):
+        print(f"My UUID is {server_uuid}")
         self.server_ip = server_ip
         self.handshake_ports = handshake_ports
         self.data_port = None
@@ -151,7 +154,6 @@ class InactiveServer:
                 time.sleep(1)
 
     def perform_handshake(self):
-        global server_id
         for port in self.handshake_ports:
             handshake_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             handshake_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -162,21 +164,15 @@ class InactiveServer:
             try:
                 response, server_address = handshake_socket.recvfrom(1024)
                 server_info = response.decode('utf-8')
-                self.server_ip, self.data_port, server_id = server_info.split(':')
+                self.server_ip, self.data_port = server_info.split(':')
                 self.data_port = int(self.data_port)
-                server_id = int(server_id)
-                print(f"Received handshake response from {server_address}: IP {self.server_ip}, Port {self.data_port}, Server ID {server_id}")
+                print(f"Received handshake response from {server_address}: IP {self.server_ip}, Port {self.data_port}")
                 return
             except socket.timeout:
                 print(f"Handshake response timed out on port {port}. Trying next port...")
-        if server_id is None:
-            print("Failed to receive handshake response from all ports. Retrying...")
-            time.sleep(0.1)
-            self.perform_handshake()
-        else:
-            print("Failed to receive handshake response from all ports. Becoming new leader")
-            server_id = 0
-            self.election()
+        print("Failed to receive handshake response from all ports. Starting new election.")
+        self.election()
+
 
 
     def start_heartbeat(self):
@@ -232,18 +228,62 @@ class InactiveServer:
 
     def election(self):
         global is_leader
-        global server_id
+        global server_uuid
         self.connected = False
         self.cleanup()
-        if server_id == 0:
-            is_leader = True
-            application()
-        else:
-            is_leader = False
-            time.sleep(server_id)
-            server_ip = "255.255.255.255"  # Broadcast IP address for handshake
-            client = InactiveServer(server_ip)
-            client.run()
+        # Re-run the discovery and election process
+        application()
+
+
+
+class Discovery:
+    def __init__(self, discovery_port=50000, discovery_time=15):
+        self.discovery_port = discovery_port
+        self.discovery_time = discovery_time
+        self.received_uuids = []
+        self.stop_event = threading.Event()
+    
+    def broadcast_uuid(self, server_uuid):
+        discovery_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        discovery_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        message = str(server_uuid).encode('utf-8')
+        end_time = time.time() + self.discovery_time
+        while time.time() < end_time and not self.stop_event.is_set():
+            discovery_socket.sendto(message, ('<broadcast>', self.discovery_port))
+            time.sleep(1)  # Send every second
+        discovery_socket.close()
+    
+    def listen_for_uuids(self, server_uuid):
+        listener_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        listener_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener_socket.bind(('', self.discovery_port))
+        listener_socket.settimeout(1)
+        end_time = time.time() + self.discovery_time
+        while time.time() < end_time and not self.stop_event.is_set():
+            try:
+                data, addr = listener_socket.recvfrom(1024)
+                received_uuid = uuid.UUID(data.decode('utf-8'))
+                if received_uuid != server_uuid and received_uuid not in self.received_uuids:
+                    self.received_uuids.append(received_uuid)
+                    print(f"Discovered server with UUID: {received_uuid}")
+            except socket.timeout:
+                continue
+        listener_socket.close()
+    
+    def start_discovery(self, server_uuid):
+        broadcaster = threading.Thread(target=self.broadcast_uuid, args=(server_uuid,))
+        listener = threading.Thread(target=self.listen_for_uuids, args=(server_uuid,))
+        broadcaster.start()
+        listener.start()
+        broadcaster.join()
+        listener.join()
+        self.stop_event.set()
+        return self.received_uuids
+
+
+
+
+
 
 def application():
     if is_leader:
@@ -255,8 +295,4 @@ def application():
         client.run()
 
 if __name__ == "__main__":
-    if input("Leader? Please enter y/n: ").lower() == "y":
-        is_leader = True
-    else:
-        is_leader = False
     application()
