@@ -2,13 +2,17 @@ import socket
 import threading
 import random
 import time
+import uuid
 
 is_leader = False
 server_id = None
+servers = []
 
 # Server class to handle the connection and communication
 class Server:
     def __init__(self, handshake_ports=[60000, 60001, 60002, 60003]):
+        self.uuid = uuid.uuid4()
+        self.server_id = None  # This will be set later
         self.handshake_ports = handshake_ports
         self.handshake_port = None
         self.data_port = self.get_random_port(49152, 59999)
@@ -24,10 +28,19 @@ class Server:
         return random.randint(start, end)
 
     def start_server(self):
+        global servers
+        servers.append(self)
+        self.assign_server_ids()
         print(f"Server listening for connections on {self.data_port}")
         accept_thread = threading.Thread(target=self.accept_connections)
         accept_thread.start()
         self.listen_for_handshake()
+    
+    def assign_server_ids(self):
+        global servers
+        sorted_servers = sorted(servers, key=lambda x: x.uuid)
+        for i, server in enumerate(sorted_servers):
+            server.server_id = i
 
     def listen_for_handshake(self):
         for port in self.handshake_ports:
@@ -50,8 +63,8 @@ class Server:
                     handshake_socket.sendto(response.encode('utf-8'), addr)
                     print(f"Handshake response sent to {addr}: {response}")
                 elif message == "REQUEST_CONNECTION_INACTIVE_SERVER":
-                    response = f"{self.get_ip_address()}:{self.data_port}:{self.next_server_id}"
-                    self.next_server_id += 1
+                    self.assign_server_ids()  # Reassign IDs before sending
+                    response = f"{self.get_ip_address()}:{self.data_port}:{self.server_id}:{self.uuid}"
                     handshake_socket.sendto(response.encode('utf-8'), addr)
                     print(f"Handshake response sent to {addr}: {response}")
             except Exception as e:
@@ -124,6 +137,8 @@ class Server:
 
 class InactiveServer:
     def __init__(self, server_ip, handshake_ports=[60000, 60001, 60002]):
+        self.uuid = uuid.uuid4()
+        self.server_id = None
         self.server_ip = server_ip
         self.handshake_ports = handshake_ports
         self.data_port = None
@@ -151,6 +166,7 @@ class InactiveServer:
                 time.sleep(1)
 
     def perform_handshake(self):
+        global servers
         global server_id
         for port in self.handshake_ports:
             handshake_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -162,10 +178,12 @@ class InactiveServer:
             try:
                 response, server_address = handshake_socket.recvfrom(1024)
                 server_info = response.decode('utf-8')
-                self.server_ip, self.data_port, server_id = server_info.split(':')
+                self.server_ip, self.data_port, self.server_id, server_uuid = server_info.split(':')
                 self.data_port = int(self.data_port)
-                server_id = int(server_id)
-                print(f"Received handshake response from {server_address}: IP {self.server_ip}, Port {self.data_port}, Server ID {server_id}")
+                self.server_id = int(self.server_id)
+                self.uuid = uuid.UUID(server_uuid)
+                servers.append(self)
+                print(f"Received handshake response from {server_address}: IP {self.server_ip}, Port {self.data_port}, Server ID {self.server_id}, UUID {self.uuid}")
                 return
             except socket.timeout:
                 print(f"Handshake response timed out on port {port}. Trying next port...")
@@ -232,15 +250,19 @@ class InactiveServer:
 
     def election(self):
         global is_leader
-        global server_id
+        global servers
         self.connected = False
         self.cleanup()
-        if server_id == 0:
+        servers = [s for s in servers if s.uuid != self.uuid]  # Remove self from servers list
+        sorted_servers = sorted(servers, key=lambda x: x.uuid)
+        for i, server in enumerate(sorted_servers):
+            server.server_id = i
+        if self.server_id == 0:
             is_leader = True
             application()
         else:
             is_leader = False
-            time.sleep(server_id)
+            time.sleep(self.server_id)
             server_ip = "255.255.255.255"  # Broadcast IP address for handshake
             client = InactiveServer(server_ip)
             client.run()
