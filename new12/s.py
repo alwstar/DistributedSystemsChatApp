@@ -16,18 +16,145 @@ class Server:
         self.server_socket.bind(('0.0.0.0', self.data_port))
         self.server_socket.listen(5)
         self.clients = {}
+        self.other_servers = {}
         self.lock = threading.Lock()
         self.running = True
         self.next_server_id = 0
+        self.is_leader = False
+        self.server_id = random.randint(1, 1000000)  # Generate a random ID
+        self.leader_id = None
+        self.leader_heartbeat = time.time()
 
     def get_random_port(self, start, end):
         return random.randint(start, end)
 
     def start_server(self):
-        print(f"Server listening for connections on {self.data_port}")
-        accept_thread = threading.Thread(target=self.accept_connections)
-        accept_thread.start()
-        self.listen_for_handshake()
+        print(f"Server (ID: {self.server_id}) starting on {self.get_ip_address()}:{self.data_port}")
+        self.discover_servers()
+        self.form_ring()
+        self.start_election()
+        if self.is_leader:
+            self.announce_leader()
+        self.listen_for_connections()
+
+    # Discover other servers in the network
+
+    def discover_servers(self):
+        discovery_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        discovery_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        discovery_socket.settimeout(2)
+
+        for port in self.handshake_ports:
+            message = f"DISCOVER:{self.server_id}:{self.get_ip_address()}:{self.data_port}"
+            discovery_socket.sendto(message.encode(), ('<broadcast>', port))
+
+        start_time = time.time()
+        while time.time() - start_time < 5:  # Discovery period of 5 seconds
+            try:
+                data, addr = discovery_socket.recvfrom(1024)
+                message = data.decode()
+                if message.startswith("DISCOVER:"):
+                    _, server_id, ip, port = message.split(':')
+                    server_id = int(server_id)
+                    port = int(port)
+                    if server_id != self.server_id:
+                        self.other_servers[server_id] = (ip, port)
+                        print(f"Discovered server: ID {server_id} at {ip}:{port}")
+            except socket.timeout:
+                pass
+
+        discovery_socket.close()
+        print(f"Server discovery complete. Found {len(self.other_servers)} other servers.")
+
+    def form_ring(self):
+        all_ids = sorted(list(self.other_servers.keys()) + [self.server_id])
+        if len(all_ids) > 1:
+            next_index = (all_ids.index(self.server_id) + 1) % len(all_ids)
+            next_id = all_ids[next_index]
+            self.next_server = self.other_servers[next_id] if next_id != self.server_id else (self.get_ip_address(), self.data_port)
+        else:
+            self.next_server = (self.get_ip_address(), self.data_port)
+        
+        print(f"Ring formed. Next server is {'self' if self.next_server[0] == self.get_ip_address() else self.next_server}")
+
+    def start_election(self):
+        print("Starting leader election...")
+        election_message = f"ELECTION:{self.server_id}"
+        self.send_to_next(election_message)
+        
+        highest_id = self.server_id
+        while True:
+            data = self.receive_from_previous()
+            if data.startswith("ELECTION:"):
+                received_id = int(data.split(':')[1])
+                if received_id > highest_id:
+                    highest_id = received_id
+                    self.send_to_next(f"ELECTION:{highest_id}")
+                elif received_id < self.server_id:
+                    self.send_to_next(f"ELECTION:{self.server_id}")
+                else:  # received_id == self.server_id
+                    self.leader_id = self.server_id
+                    self.is_leader = True
+                    print(f"Election complete. Server {self.server_id} is the new leader.")
+                    break
+
+    def announce_leader(self):
+        if self.is_leader:
+            announcement = f"LEADER:{self.server_id}"
+            self.send_to_next(announcement)
+            print(f"Announced self as leader (ID: {self.server_id})")
+
+    def send_to_next(self, message):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.connect(self.next_server)
+            s.sendall(message.encode())
+
+    def receive_from_previous(self):
+        conn, addr = self.server_socket.accept()
+        with conn:
+            data = conn.recv(1024).decode()
+            return data
+
+    def listen_for_connections(self):
+        while self.running:
+            conn, addr = self.server_socket.accept()
+            threading.Thread(target=self.handle_connection, args=(conn, addr)).start()
+
+    def handle_connection(self, conn, addr):
+        with conn:
+            data = conn.recv(1024).decode()
+            if data.startswith("ELECTION:"):
+                self.handle_election_message(data)
+            elif data.startswith("LEADER:"):
+                self.handle_leader_announcement(data)
+            # Handle other types of messages (e.g., client connections) here
+
+    def handle_election_message(self, message):
+        received_id = int(message.split(':')[1])
+        if received_id > self.server_id:
+            self.send_to_next(message)
+        elif received_id < self.server_id:
+            self.send_to_next(f"ELECTION:{self.server_id}")
+        else:  # received_id == self.server_id
+            self.leader_id = self.server_id
+            self.is_leader = True
+            print(f"Election complete. Server {self.server_id} is the new leader.")
+            self.announce_leader()
+
+    def handle_leader_announcement(self, message):
+        leader_id = int(message.split(':')[1])
+        if leader_id != self.server_id:
+            self.leader_id = leader_id
+            self.is_leader = False
+            print(f"New leader announced: Server {leader_id}")
+            self.send_to_next(message)
+
+
+
+
+
+
+    # 
 
     def listen_for_handshake(self):
         for port in self.handshake_ports:
