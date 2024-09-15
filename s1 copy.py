@@ -4,11 +4,10 @@ import time
 import json
 import random
 import sys
-import uuid
 
 # Constants
 UDP_PORT = 42000
-TCP_BASE_PORT = 6000
+TCP_BASE_PORT = 6001
 CLIENT_DISCOVERY_PORT = 5000  # New port for client discovery
 CLIENT_LISTEN_PORT = 5001
 CLIENT_SEND_PORT = 5002
@@ -21,14 +20,13 @@ HEARTBEAT_INTERVAL = 5
 LEADER_CHECK_INTERVAL = 10
 
 # Global variables
-server_id = f"SERVER_{uuid.uuid4()}"
+server_id = f"SERVER_{random.randint(1000, 9999)}_{int(time.time())}"
 tcp_port = None
 connected_servers = {}
 connected_clients = {}
 leader = None
 is_active = True
 shutdown_event = threading.Event()
-leader_search_shutdown_event = threading.Event()
 ring_formed = threading.Event()
 election_in_progress = threading.Event()
 all_servers_ready = threading.Event()
@@ -54,7 +52,7 @@ def broadcast_presence():
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
         udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         end_time = time.time() + SEARCH_TIME
-        while time.time() < end_time and not shutdown_event.is_set() and not leader_search_shutdown_event.is_set():
+        while time.time() < end_time and not shutdown_event.is_set():
             message = create_json_message("server_available", id=server_id, port=tcp_port)
             try:
                 udp_socket.sendto(message, ('<broadcast>', UDP_PORT))
@@ -64,7 +62,7 @@ def broadcast_presence():
             time.sleep(1)
     print("Server search completed.")
     ring_formed.set()
-    
+
 def listen_for_broadcasts():
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
         udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -72,7 +70,7 @@ def listen_for_broadcasts():
         udp_socket.settimeout(1)
         print(f"Listening for broadcasts on UDP port {UDP_PORT}")
         end_time = time.time() + SEARCH_TIME
-        while time.time() < end_time and not shutdown_event.is_set() and not leader_search_shutdown_event.is_set():
+        while time.time() < end_time and not shutdown_event.is_set():
             try:
                 data, addr = udp_socket.recvfrom(BUFFER_SIZE)
                 message_type, message_data = parse_json_message(data.decode())
@@ -141,6 +139,8 @@ def handle_message(message_type, message_data, sender_id):
     elif message_type == "leader_announcement":
         leader = message_data['leader_id']
         print(f"Leader announced: {leader}")
+        if leader != server_id:
+            print(f"This server acknowledges {leader} as the leader")
         election_in_progress.clear()
     elif message_type == "heartbeat":
         pass
@@ -154,7 +154,6 @@ def handle_message(message_type, message_data, sender_id):
                 print(f"Error responding to leader check from {sender_id}: {e}")
 
 def handle_election(election_data, sender_id):
-    
     global leader
     candidate_id = election_data['candidate_id']
     print(f"Received election message from {sender_id} with candidate {candidate_id}")
@@ -170,24 +169,19 @@ def handle_election(election_data, sender_id):
 def start_election():
     global leader
     if not election_in_progress.is_set():
-        backoff_time = random.uniform(1, 3)
-        print(f"Server {server_id} waiting for {backoff_time} seconds before starting election")
-        time.sleep(backoff_time)
+        election_in_progress.set()
+        leader = None
+        print(f"Starting election with candidate ID: {server_id}")
+        election_message = create_json_message("election", candidate_id=server_id)
+        next_server = get_next_server_in_ring()
+        if next_server:
+            try:
+                connected_servers[next_server]['socket'].send(election_message)
+            except Exception as e:
+                print(f"Error sending election message to {next_server}: {e}")
+                election_in_progress.clear()
         
-        if not election_in_progress.is_set():
-            threading.Timer(ELECTION_TIMEOUT, end_election_timeout).start()
-            election_in_progress.set()
-            leader = None
-            print(f"Starting election with candidate ID: {server_id}")
-            election_message = create_json_message("election", candidate_id=server_id)
-            next_server = get_next_server_in_ring()
-            if next_server:
-                try:
-                    connected_servers[next_server]['socket'].send(election_message)
-                except Exception as e:
-                    print(f"Error sending election message to {next_server}: {e}")
-                    election_in_progress.clear()
-            
+        threading.Timer(ELECTION_TIMEOUT, end_election_timeout).start()
 
 def end_election_timeout():
     global leader
@@ -215,7 +209,6 @@ def announce_leader():
         except Exception as e:
             print(f"Error announcing leader to {srv_id}: {e}")
     election_in_progress.clear()
-    leader_search_shutdown_event.set() # Stop searching for leader
 
 def get_next_server_in_ring():
     if not connected_servers:
@@ -379,8 +372,8 @@ def check_leader_status():
         if leader and leader != server_id:
             try:
                 leader_socket = connected_servers[leader]['socket']
-                leader_socket.send(create_json_message("heartbeat"))
-                leader_socket.settimeout(LEADER_CHECK_INTERVAL)
+                leader_socket.send(create_json_message("leader_check"))
+                leader_socket.settimeout(5)
                 response = leader_socket.recv(BUFFER_SIZE)
                 message_type, _ = parse_json_message(response.decode())
                 if message_type != "leader_alive":
