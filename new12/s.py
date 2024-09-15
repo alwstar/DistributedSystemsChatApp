@@ -2,6 +2,7 @@ import socket
 import threading
 import random
 import time
+import uuid
 
 is_leader = False
 server_id = None
@@ -9,6 +10,7 @@ server_id = None
 # Server class to handle the connection and communication
 class Server:
     def __init__(self, handshake_ports=[60000, 60001, 60002, 60003]):
+        self.id = uuid.uuid4()
         self.handshake_ports = handshake_ports
         self.handshake_port = None
         self.data_port = self.get_random_port(49152, 59999)
@@ -50,13 +52,35 @@ class Server:
                     handshake_socket.sendto(response.encode('utf-8'), addr)
                     print(f"Handshake response sent to {addr}: {response}")
                 elif message == "REQUEST_CONNECTION_INACTIVE_SERVER":
-                    response = f"{self.get_ip_address()}:{self.data_port}:{self.next_server_id}"
-                    self.next_server_id += 1
+                    response = f"{self.get_ip_address()}:{self.data_port}:{self.id}"
                     handshake_socket.sendto(response.encode('utf-8'), addr)
                     print(f"Handshake response sent to {addr}: {response}")
             except Exception as e:
                 print(f"Error during handshake: {e}")
                 break
+
+    # Leader Election Process
+
+    def start_election(self):
+        print("Starting leader election...")
+        highest_id = self.id
+        for client_address, client_socket in self.clients.items():
+            try:
+                client_socket.sendall(b"ELECTION")
+                response = client_socket.recv(1024).decode('utf-8')
+                if response.startswith("ID:"):
+                    client_id = uuid.UUID(response[3:])
+                    if client_id > highest_id:
+                        highest_id = client_id
+            except socket.error:
+                print(f"Error communicating with {client_address} during election")
+        
+        if highest_id == self.id:
+            print("I am the new leader")
+            self.broadcast_message("NEW_LEADER:" + str(self.id))
+        else:
+            print(f"New leader is {highest_id}")
+            self.leader_id = highest_id
 
     def get_ip_address(self):
         hostname = socket.gethostname()
@@ -124,6 +148,7 @@ class Server:
 
 class InactiveServer:
     def __init__(self, server_ip, handshake_ports=[60000, 60001, 60002]):
+        self.id = uuid.uuid4()
         self.server_ip = server_ip
         self.handshake_ports = handshake_ports
         self.data_port = None
@@ -164,8 +189,8 @@ class InactiveServer:
                 server_info = response.decode('utf-8')
                 self.server_ip, self.data_port, server_id = server_info.split(':')
                 self.data_port = int(self.data_port)
-                server_id = int(server_id)
-                print(f"Received handshake response from {server_address}: IP {self.server_ip}, Port {self.data_port}, Server ID {server_id}")
+                self.leader_id = uuid.UUID(server_id)
+                print(f"Received handshake response from {server_address}: IP {self.server_ip}, Port {self.data_port}, Server ID {self.leader_id}")
                 return
             except socket.timeout:
                 print(f"Handshake response timed out on port {port}. Trying next port...")
@@ -177,6 +202,39 @@ class InactiveServer:
             print("Failed to receive handshake response from all ports. Becoming new leader")
             server_id = 0
             self.election()
+
+    # Leader Election Process
+
+
+
+
+    # In the InactiveServer class
+    def election(self):
+        print("Participating in leader election...")
+        try:
+            self.socket.sendall(f"ID:{self.id}".encode('utf-8'))
+            response = self.socket.recv(1024).decode('utf-8')
+            if response.startswith("NEW_LEADER:"):
+                new_leader_id = uuid.UUID(response[10:])
+                if new_leader_id == self.id:
+                    print("I am the new leader")
+                    self.become_leader()
+                else:
+                    print(f"New leader is {new_leader_id}")
+                    self.leader_id = new_leader_id
+        except socket.error:
+            print("Error during election, assuming leadership")
+            self.become_leader()
+
+    def become_leader(self):
+        global is_leader
+        is_leader = True
+        self.cleanup()
+        application()
+
+
+    # Start the heartbeat thread
+
 
 
     def start_heartbeat(self):
@@ -246,17 +304,9 @@ class InactiveServer:
             client.run()
 
 def application():
-    if is_leader:
-        server = Server()
-        server.run()
-    else:
-        server_ip = "255.255.255.255"  # Broadcast IP address for handshake
-        client = InactiveServer(server_ip)
-        client.run()
+    server = Server() if is_leader else InactiveServer("255.255.255.255")
+    server.run()
 
 if __name__ == "__main__":
-    if input("Leader? Please enter y/n: ").lower() == "y":
-        is_leader = True
-    else:
-        is_leader = False
+    is_leader = False  # Always start as a non-leader
     application()
